@@ -6,10 +6,6 @@ from app.utils.logger import logger
 
 
 async def start_cleanup_task():
-    """
-    Periodically deletes files older than CLEANUP_AGE_HOURS.
-    Runs as a background coroutine on app startup.
-    """
     while True:
         try:
             now = time.time()
@@ -24,4 +20,4 @@ async def start_cleanup_task():
                         logger.info(f"Cleaned up old file: {f}")
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
-        await asyncio.sleep(3600)  # Run every hour
+        await asyncio.sleep(3600)
