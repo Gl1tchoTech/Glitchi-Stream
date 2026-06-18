@@ -9,10 +9,6 @@ router = APIRouter(prefix="/download", tags=["Download"])
 
 @router.post("/", response_model=BaseResponse)
 async def trigger_download(req: DownloadRequest, bg_tasks: BackgroundTasks):
-    """
-    Queue a Spotify URL for download. SpotiFLAC runs in the background.
-    Supports tracks, albums, playlists, and artist discographies.
-    """
     if not is_spotify_url(str(req.url)):
         raise HTTPException(status_code=400, detail="Not a valid Spotify URL")
 
