@@ -2,6 +2,6 @@ fastapi
 uvicorn[standard]
 pydantic
 pydantic-settings
-SpotiFLAC
+SpotiFLAC==1.1.7
+spotipy
 aiofiles
-backend
