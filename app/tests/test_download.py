@@ -4,9 +4,17 @@ from app.main import app
 client = TestClient(app)
 
 
+def test_download_missing_url():
+    response = client.post("/download/", json={})
+    assert response.status_code == 422
+
+
 def test_download_invalid_url():
-    response = client.post("/download/", json={"url": "https://google.com"})
-    assert response.status_code == 422  # pydantic validation (not an HttpUrl match)
+    response = client.post(
+        "/download/",
+        json={"url": "https://google.com"},
+    )
+    assert response.status_code == 422
 
 
 def test_download_valid_spotify_url():
