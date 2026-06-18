@@ -1,9 +1,9 @@
 from fastapi import APIRouter, HTTPException, Query
 from app.models.responses import (
     SearchResults,
-    SpotifyTrack,
-    SpotifyAlbum,
-    SpotifyArtist,
+    Track,
+    Album,
+    Artist,
 )
 from app.services.spotify_search_service import search_spotify
 
@@ -20,58 +20,50 @@ async def search(
     try:
         raw = search_spotify(q=q, search_type=type, limit=limit, market=market)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Spotify API error: {e}")
+        raise HTTPException(
+            status_code=502, detail=f"Search API error: {e}"
+        )
 
     results = SearchResults(query=q)
 
     if "tracks" in raw:
         for t in raw["tracks"]["items"]:
             results.tracks.append(
-                SpotifyTrack(
-                    name=t["name"],
-                    id=t["id"],
-                    uri=t["uri"],
-                    artists=", ".join(a["name"] for a in t["artists"]),
-                    album=t["album"]["name"],
-                    album_image_url=(
-                        t["album"]["images"][0]["url"]
-                        if t["album"].get("images")
-                        else ""
-                    ),
-                    duration_ms=t["duration_ms"],
-                    explicit=t.get("explicit", False),
-                    popularity=t.get("popularity", 0),
+                Track(
+                    name=t.get("name", ""),
+                    id=t.get("id", ""),
+                    artists=t.get("artists", ""),
+                    album=t.get("album", ""),
+                    album_image_url=t.get("album_image_url", ""),
+                    duration_ms=t.get("duration_ms", 0),
                     preview_url=t.get("preview_url"),
-                    url=t["external_urls"].get("spotify", ""),
+                    url=t.get("url", ""),
                 )
             )
 
     if "albums" in raw:
         for a in raw["albums"]["items"]:
             results.albums.append(
-                SpotifyAlbum(
-                    name=a["name"],
-                    id=a["id"],
-                    uri=a["uri"],
-                    artists=", ".join(ar["name"] for ar in a["artists"]),
+                Album(
+                    name=a.get("name", ""),
+                    id=a.get("id", ""),
+                    artists=a.get("artists", ""),
                     release_date=a.get("release_date", ""),
                     total_tracks=a.get("total_tracks", 0),
-                    image_url=a["images"][0]["url"] if a.get("images") else "",
-                    url=a["external_urls"].get("spotify", ""),
+                    image_url=a.get("image_url", ""),
+                    url=a.get("url", ""),
                 )
             )
 
     if "artists" in raw:
         for ar in raw["artists"]["items"]:
             results.artists.append(
-                SpotifyArtist(
-                    name=ar["name"],
-                    id=ar["id"],
-                    uri=ar["uri"],
-                    genres=", ".join(ar.get("genres", [])),
-                    followers=ar.get("followers", {}).get("total", 0),
-                    image_url=ar["images"][0]["url"] if ar.get("images") else "",
-                    url=ar["external_urls"].get("spotify", ""),
+                Artist(
+                    name=ar.get("name", ""),
+                    id=ar.get("id", ""),
+                    genres=ar.get("genres", ""),
+                    image_url=ar.get("image_url", ""),
+                    url=ar.get("url", ""),
                 )
             )
 
