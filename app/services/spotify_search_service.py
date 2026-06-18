@@ -1,115 +1,130 @@
-import json
-import urllib.parse
-import urllib.request
+from spotapi import Song, Artist
 from app.utils.logger import logger
 
-ITUNES_SEARCH_URL = "https://itunes.apple.com/search"
 
-# Map our search type names to iTunes entity values
-ITUNES_ENTITY_MAP = {
-    "track": "musicTrack",
-    "album": "album",
-    "artist": "musicArtist",
-}
-
-
-def _itunes_search(query: str, entity: str, limit: int, country: str) -> list[dict]:
-    """Call the iTunes Search API for a single entity type."""
-    params = urllib.parse.urlencode({
-        "term": query,
-        "entity": entity,
-        "limit": limit,
-        "country": country,
-    })
-    url = f"{ITUNES_SEARCH_URL}?{params}"
-
-    logger.info(f"iTunes search: entity={entity} q='{query}'")
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        data = json.loads(resp.read().decode())
-
-    return data.get("results", [])
+def _uri_to_url(uri: str) -> str:
+    """Convert spotify:track:XXX → https://open.spotify.com/track/XXX"""
+    if not uri or ":" not in uri:
+        return ""
+    parts = uri.split(":")
+    if len(parts) >= 3:
+        entity_type = parts[1]
+        entity_id = parts[2]
+        return f"https://open.spotify.com/{entity_type}/{entity_id}"
+    return ""
 
 
-def _make_spotify_url(artist_name: str, track_or_album: str = "") -> str:
-    """Build a Spotify search URL from artist and optional track/album name."""
-    if track_or_album:
-        query = f"{artist_name} {track_or_album}"
-    else:
-        query = artist_name
-    return f"https://open.spotify.com/search/{urllib.parse.quote(query)}"
+def _uri_to_id(uri: str) -> str:
+    """Extract the ID from a Spotify URI."""
+    if not uri or ":" not in uri:
+        return ""
+    return uri.rsplit(":", 1)[-1]
 
 
-def _hi_res_artwork(url: str) -> str:
-    """Convert iTunes 100x100 artwork URL to 600x600."""
-    return url.replace("100x100bb.jpg", "600x600bb.jpg") if url else ""
+def _best_image(sources: list) -> str:
+    """Pick the best image URL from a list of sources."""
+    if not sources:
+        return ""
+    best = max(sources, key=lambda s: s.get("width", 0) * s.get("height", 0))
+    return best.get("url", "")
 
 
 def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     """
-    Search for music using the iTunes Search API (free, no auth).
-    Returns a dict compatible with the old Spotify response structure
-    so existing parsing in search.py works with minimal changes.
+    Search Spotify via SpotAPI (no credentials needed).
+    Kinda sus but it works.
     """
-    logger.info(f"Search via iTunes: q='{q}' type={search_type} limit={limit}")
+    logger.info(f"SpotAPI search: q='{q}' type={search_type} limit={limit}")
 
     types_requested = set(t.strip() for t in search_type.split(","))
     raw: dict[str, list] = {}
 
-    for stype in ("track", "album", "artist"):
-        if stype not in types_requested:
-            continue
-        entity = ITUNES_ENTITY_MAP.get(stype)
-        if not entity:
-            continue
-        results = _itunes_search(q, entity, limit, market)
+    # Track & Album search via Song.query_songs (returns both tracksV2 + albumsV2)
+    if "track" in types_requested or "album" in types_requested:
+        song = Song()
+        song_data = song.query_songs(q, limit=limit)
+        search_v2 = song_data.get("data", {}).get("searchV2", {})
 
-        items = []
-        for item in results:
-            wrapper = item.get("wrapperType", "")
-            if wrapper == "track":
-                name = item.get("trackName", "")
-                artist_name = item.get("artistName", "")
-                album_name = item.get("collectionName", "")
-                artwork = _hi_res_artwork(item.get("artworkUrl100", ""))
-                items.append({
-                    "name": name,
-                    "id": str(item.get("trackId", "")),
-                    "artists": artist_name,
-                    "album": album_name,
-                    "album_image_url": artwork,
-                    "duration_ms": item.get("trackTimeMillis", 0),
-                    "preview_url": item.get("previewUrl"),
-                    "url": _make_spotify_url(artist_name, name),
+        if "track" in types_requested:
+            track_items_raw = (
+                search_v2.get("tracksV2", {}).get("items", [])
+            )
+            track_items = []
+            for wrapper in track_items_raw:
+                item = wrapper.get("item", {})
+                data = item.get("data", {})
+                uri = data.get("uri", "")
+                album_data = data.get("albumOfTrack", {})
+                artists_items = data.get("artists", {}).get("items", [])
+                artist_names = ", ".join(
+                    a.get("profile", {}).get("name", "")
+                    for a in artists_items
+                )
+                cover_sources = album_data.get("coverArt", {}).get("sources", [])
+                track_items.append({
+                    "name": data.get("name", ""),
+                    "id": _uri_to_id(uri),
+                    "uri": uri,
+                    "artists": artist_names,
+                    "album": album_data.get("name", ""),
+                    "album_image_url": _best_image(cover_sources),
+                    "duration_ms": data.get("duration", {}).get("totalMilliseconds", 0),
+                    "preview_url": None,
+                    "url": _uri_to_url(uri),
                 })
-            elif wrapper == "collection":
-                name = item.get("collectionName", "")
-                artist_name = item.get("artistName", "")
-                artwork = _hi_res_artwork(item.get("artworkUrl100", ""))
-                items.append({
-                    "name": name,
-                    "id": str(item.get("collectionId", "")),
-                    "artists": artist_name,
-                    "release_date": item.get("releaseDate", ""),
-                    "total_tracks": item.get("trackCount", 0),
-                    "image_url": artwork,
-                    "url": _make_spotify_url(artist_name, name),
-                })
-            elif wrapper == "artist":
-                name = item.get("artistName", "")
-                items.append({
-                    "name": name,
-                    "id": str(item.get("artistId", "")),
-                    "genres": item.get("primaryGenreName", ""),
-                    "image_url": "",
-                    "url": _make_spotify_url(name),
-                })
+            raw["tracks"] = {"items": track_items}
 
-        if stype == "track":
-            raw["tracks"] = {"items": items}
-        elif stype == "album":
-            raw["albums"] = {"items": items}
-        elif stype == "artist":
-            raw["artists"] = {"items": items}
+        if "album" in types_requested:
+            album_items_raw = (
+                search_v2.get("albumsV2", {}).get("items", [])
+            )
+            album_items = []
+            for wrapper in album_items_raw:
+                data = wrapper.get("data", {})
+                uri = data.get("uri", "")
+                artists_items = data.get("artists", {}).get("items", [])
+                artist_names = ", ".join(
+                    a.get("profile", {}).get("name", "")
+                    for a in artists_items
+                )
+                cover_sources = data.get("coverArt", {}).get("sources", [])
+                album_items.append({
+                    "name": data.get("name", ""),
+                    "id": _uri_to_id(uri),
+                    "uri": uri,
+                    "artists": artist_names,
+                    "release_date": str(data.get("date", {}).get("year", "")),
+                    "total_tracks": 0,
+                    "image_url": _best_image(cover_sources),
+                    "url": _uri_to_url(uri),
+                })
+            raw["albums"] = {"items": album_items}
+
+    # Artist search via Artist.query_artists
+    if "artist" in types_requested:
+        artist = Artist()
+        artist_data = artist.query_artists(q, limit=limit)
+        search_v2 = artist_data.get("data", {}).get("searchV2", {})
+        artist_items_raw = search_v2.get("artists", {}).get("items", [])
+
+        artist_items = []
+        for wrapper in artist_items_raw:
+            data = wrapper.get("data", {})
+            uri = data.get("uri", "")
+            avatar_sources = (
+                data.get("visuals", {})
+                .get("avatarImage", {})
+                .get("sources", [])
+            )
+            artist_items.append({
+                "name": data.get("profile", {}).get("name", ""),
+                "id": _uri_to_id(uri),
+                "uri": uri,
+                "genres": "",
+                "followers": 0,
+                "image_url": _best_image(avatar_sources),
+                "url": _uri_to_url(uri),
+            })
+        raw["artists"] = {"items": artist_items}
 
     return raw

@@ -34,3 +34,16 @@ async def stream_file(
         )
     except (ValueError, FileNotFoundError) as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/download/{filename:path}")
+async def download_file(filename: str):
+    try:
+        path = get_file_path(filename)
+        return FileResponse(
+            path=path,
+            media_type="application/octet-stream",
+            filename=os.path.basename(filename),
+        )
+    except (ValueError, FileNotFoundError) as e:
+        raise HTTPException(status_code=404, detail=str(e))

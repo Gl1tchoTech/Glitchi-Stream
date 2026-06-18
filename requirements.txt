@@ -3,4 +3,7 @@ uvicorn[standard]
 pydantic
 pydantic-settings
 SpotiFLAC==1.1.7
+spotapi
+pymongo
+redis
 aiofiles
