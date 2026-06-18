@@ -8,3 +8,10 @@ class DownloadRequest(BaseModel):
     quality: Optional[str] = "LOSSLESS"
     timeout_s: Optional[int] = 10
     track_max_retries: Optional[int] = 3
+
+
+class SearchRequest(BaseModel):
+    q: str
+    type: str = "track,album,artist"
+    limit: int = 20
+    market: str = "US"
