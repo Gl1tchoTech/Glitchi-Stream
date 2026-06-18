@@ -6,8 +6,25 @@ from app.models.requests import DownloadRequest
 
 
 async def execute_download(req: DownloadRequest) -> None:
+    """
+    Runs SpotiFLAC as a subprocess (CLI).
+    Avoids import issues with Python version incompatibilities.
+    """
     logger.info(f"Starting download: {req.url}")
-    cmd = f"spotiflac {shlex.quote(str(req.url))} {shlex.quote(settings.DOWNLOAD_DIR)}"
+
+    cmd_parts = [
+        "spotiflac",
+        shlex.quote(str(req.url)),
+        shlex.quote(settings.DOWNLOAD_DIR),
+    ]
+
+    if req.services:
+        cmd_parts.extend(["--service", *req.services])
+    if req.quality:
+        cmd_parts.extend(["--quality", req.quality])
+
+    cmd = " ".join(cmd_parts)
+
     try:
         proc = await asyncio.create_subprocess_shell(
             cmd,
@@ -15,9 +32,13 @@ async def execute_download(req: DownloadRequest) -> None:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
+
         if proc.returncode != 0:
-            logger.error(f"Download failed: {stderr.decode()}")
+            err_msg = stderr.decode().strip()
+            logger.error(f"Download failed for {req.url}: {err_msg}")
         else:
-            logger.info(f"Download complete: {req.url}")
+            out_msg = stdout.decode().strip()
+            logger.info(f"Download complete: {req.url} — {out_msg}")
+
     except Exception as e:
         logger.error(f"Download error for {req.url}: {e}")
