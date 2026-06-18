@@ -1,10 +1,17 @@
 import re
 
-# Spotify URL patterns
-SPOTIFY_TRACK_RE = re.compile(r"https://open\.spotify\.com/track/[A-Za-z0-9]+")
-SPOTIFY_ALBUM_RE = re.compile(r"https://open\.spotify\.com/album/[A-Za-z0-9]+")
-SPOTIFY_PLAYLIST_RE = re.compile(r"https://open\.spotify\.com/playlist/[A-Za-z0-9]+")
-SPOTIFY_ARTIST_RE = re.compile(r"https://open\.spotify\.com/artist/[A-Za-z0-9]+")
+SPOTIFY_TRACK_RE = re.compile(
+    r"https?://open\.spotify\.com/(intl-\w+/)?track/[A-Za-z0-9]+"
+)
+SPOTIFY_ALBUM_RE = re.compile(
+    r"https?://open\.spotify\.com/(intl-\w+/)?album/[A-Za-z0-9]+"
+)
+SPOTIFY_PLAYLIST_RE = re.compile(
+    r"https?://open\.spotify\.com/(intl-\w+/)?playlist/[A-Za-z0-9]+"
+)
+SPOTIFY_ARTIST_RE = re.compile(
+    r"https?://open\.spotify\.com/(intl-\w+/)?artist/[A-Za-z0-9]+"
+)
 
 
 def is_spotify_url(url: str) -> bool:
