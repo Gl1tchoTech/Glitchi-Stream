@@ -4,7 +4,7 @@ from app.main import app
 client = TestClient(app)
 
 
-def test_list_files_empty():
+def test_list_files():
     response = client.get("/files/")
     assert response.status_code == 200
     assert "files" in response.json()
