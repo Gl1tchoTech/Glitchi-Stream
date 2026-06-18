@@ -11,4 +11,4 @@ async def health_check():
         "status": "ok",
         "download_dir": settings.DOWNLOAD_DIR,
         "download_dir_exists": os.path.isdir(settings.DOWNLOAD_DIR),
-    
+    }
