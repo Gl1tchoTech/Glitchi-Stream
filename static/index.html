@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Glitchi Stream</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <svg viewBox="0 0 24 24" fill="none" class="logo-icon">
+                        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
+                        <circle cx="12" cy="12" r="4" fill="currentColor"/>
+                        <path d="M12 2v4M12 18v4M2 12h4M18 12h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                    </svg>
+                    <span>Glitchi Stream</span>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <button class="nav-item active" data-tab="search">
+                    <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <span>Search</span>
+                </button>
+                <button class="nav-item" data-tab="files">
+                    <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/><rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/><rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/><rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/></svg>
+                    <span>Your Files</span>
+                </button>
+                <button class="nav-item" data-tab="download">
+                    <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span>Download</span>
+                </button>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="theme-section">
+                    <label class="theme-label">Theme</label>
+                    <div class="theme-options">
+                        <button class="theme-btn active" data-theme="dark" title="Dark">
+                            <span class="theme-dot dark-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="galactical" title="Galactical">
+                            <span class="theme-dot galactical-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="sunset" title="Sunset">
+                            <span class="theme-dot sunset-dot"></span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Search Tab -->
+            <section id="tab-search" class="tab-content active">
+                <div class="search-hero">
+                    <h1>Find your sound</h1>
+                    <div class="search-bar">
+                        <svg viewBox="0 0 24 24" fill="none" class="search-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        <input type="text" id="search-input" placeholder="Search tracks, albums, artists..." autofocus>
+                        <div class="search-filters">
+                            <label class="filter-chip"><input type="checkbox" value="track" checked> Tracks</label>
+                            <label class="filter-chip"><input type="checkbox" value="album" checked> Albums</label>
+                            <label class="filter-chip"><input type="checkbox" value="artist" checked> Artists</label>
+                        </div>
+                    </div>
+                </div>
+                <div id="search-results" class="search-results">
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" class="empty-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        <p>Search for music to get started</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Files Tab -->
+            <section id="tab-files" class="tab-content">
+                <div class="tab-header">
+                    <h1>Your Files</h1>
+                    <button class="btn-refresh" id="refresh-files">
+                        <svg viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 11-3-6.7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 3v6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        Refresh
+                    </button>
+                </div>
+                <div id="files-list" class="files-grid">
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" class="empty-icon"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><path d="M9 9h6M9 13h6M9 17h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                        <p>No downloaded files yet</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Download Tab -->
+            <section id="tab-download" class="tab-content">
+                <div class="tab-header">
+                    <h1>Download Music</h1>
+                </div>
+                <div class="download-form">
+                    <div class="form-group">
+                        <label>Spotify URL</label>
+                        <input type="url" id="download-url" placeholder="https://open.spotify.com/track/..." class="input-field">
+                    </div>
+                    <div class="form-group">
+                        <label>Quality</label>
+                        <select id="download-quality" class="input-field">
+                            <option value="LOSSLESS">Lossless (FLAC)</option>
+                            <option value="HIGH">High (320kbps)</option>
+                            <option value="MEDIUM">Medium (160kbps)</option>
+                        </select>
+                    </div>
+                    <button id="btn-download" class="btn-primary">
+                        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        Download
+                    </button>
+                    <div id="download-status" class="status-msg hidden"></div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Player Bar -->
+        <footer class="player-bar">
+            <div class="player-left">
+                <div class="player-cover"></div>
+                <div class="player-info">
+                    <span class="player-track">No track selected</span>
+                    <span class="player-artist">&nbsp;</span>
+                </div>
+            </div>
+            <div class="player-center">
+                <div class="player-controls">
+                    <button class="ctrl-btn" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h4v12H6V6zm8 0h4v12h-4V6z"/></svg></button>
+                    <button class="ctrl-btn ctrl-play" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
+                    <button class="ctrl-btn" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+                </div>
+                <div class="progress-bar">
+                    <span class="time">0:00</span>
+                    <div class="progress-track"><div class="progress-fill"></div></div>
+                    <span class="time">0:00</span>
+                </div>
+            </div>
+            <div class="player-right">
+                <span class="powered-by">Powered by SpotAPI + SpotiFLAC</span>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Toast container -->
+    <div id="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
