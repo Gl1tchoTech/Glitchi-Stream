@@ -4,4 +4,5 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger("gl-tch@spi")
+logger = logging.getLogger("spotify-api")
+
