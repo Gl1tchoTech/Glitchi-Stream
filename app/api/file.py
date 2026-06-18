@@ -9,16 +9,13 @@ router = APIRouter(prefix="/files", tags=["Files"])
 
 @router.get("/", response_model=FileListResponse)
 async def list_files():
-    """Browse all downloaded files."""
     return FileListResponse(files=get_downloaded_files())
 
 
 @router.get("/stream")
-async def stream_file(filename: str = Query(..., description="Relative file path from downloads/")):
-    """
-    Stream a downloaded file (e.g., FLAC).
-    Provide ?filename=Artist/Album/01 Track.flac
-    """
+async def stream_file(
+    filename: str = Query(..., description="Relative file path from downloads/"),
+):
     try:
         path = get_file_path(filename)
         ext = os.path.splitext(path)[1].lower()
