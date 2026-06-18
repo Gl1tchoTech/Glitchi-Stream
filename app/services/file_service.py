@@ -5,9 +5,6 @@ from app.models.responses import FileItem
 
 
 def get_downloaded_files() -> List[FileItem]:
-    """
-    Walk the downloads directory and return all files (excluding .gitkeep).
-    """
     files: List[FileItem] = []
     for root, _, filenames in os.walk(settings.DOWNLOAD_DIR):
         for f in filenames:
@@ -28,10 +25,6 @@ def get_downloaded_files() -> List[FileItem]:
 
 
 def get_file_path(filename: str) -> str:
-    """
-    Resolve a safe absolute path inside DOWNLOAD_DIR.
-    Protects against directory traversal attacks.
-    """
     safe_path = os.path.abspath(os.path.join(settings.DOWNLOAD_DIR, filename))
     if not safe_path.startswith(os.path.abspath(settings.DOWNLOAD_DIR)):
         raise ValueError("Path traversal attempt blocked")
