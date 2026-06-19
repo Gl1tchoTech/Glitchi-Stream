@@ -211,9 +211,26 @@ async function doSearch() {
 // ===== Search History =====
 function setupSearchHistory() {
     document.getElementById('search-history').addEventListener('click', (e) => {
+        // Remove single item
+        const removeBtn = e.target.closest('.history-remove');
+        if (removeBtn) {
+            e.stopPropagation();
+            const query = removeBtn.dataset.query;
+            removeSearchHistory(query);
+            showSearchHistory();
+            return;
+        }
+        // Clear all
+        const clearBtn = e.target.closest('.history-clear');
+        if (clearBtn) {
+            e.stopPropagation();
+            clearSearchHistory();
+            return;
+        }
+        // Click item to search
         const item = e.target.closest('.search-history-item');
         if (item) {
-            document.getElementById('search-input').value = item.textContent;
+            document.getElementById('search-input').value = item.dataset.query || item.textContent;
             document.getElementById('search-history').style.display = 'none';
             doSearch();
         }
@@ -227,12 +244,31 @@ function addSearchHistory(query) {
     localStorage.setItem('glitchi-search-history', JSON.stringify(state.searchHistory));
 }
 
+function removeSearchHistory(query) {
+    state.searchHistory = state.searchHistory.filter(q => q !== query);
+    localStorage.setItem('glitchi-search-history', JSON.stringify(state.searchHistory));
+    devLog('Removed from search history', { query });
+}
+
+function clearSearchHistory() {
+    state.searchHistory = [];
+    localStorage.setItem('glitchi-search-history', '[]');
+    document.getElementById('search-history').style.display = 'none';
+    devLog('Cleared all search history');
+}
+
 function showSearchHistory() {
-    if (state.searchHistory.length === 0) return;
     const el = document.getElementById('search-history');
+    if (state.searchHistory.length === 0) {
+        el.style.display = 'none';
+        return;
+    }
     el.innerHTML = state.searchHistory.map(q =>
-        `<div class="search-history-item">${escapeHtml(q)}</div>`
-    ).join('');
+        `<div class="search-history-item" data-query="${escapeHtml(q)}">
+            <span class="history-text">${escapeHtml(q)}</span>
+            <button type="button" class="history-remove" data-query="${escapeHtml(q)}" title="Remove">&times;</button>
+        </div>`
+    ).join('') + `<div class="history-clear">Clear all history</div>`;
     el.style.display = 'block';
 }
 
