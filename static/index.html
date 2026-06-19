@@ -32,6 +32,10 @@
                     <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/><rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/><rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/><rect x="14" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="2"/></svg>
                     <span>Your Files</span>
                 </button>
+                <button class="nav-item" data-tab="playlists">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span>Playlists</span>
+                </button>
                 <button class="nav-item" data-tab="download">
                     <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                     <span>Download</span>
@@ -39,9 +43,13 @@
             </nav>
 
             <div class="sidebar-footer">
+                <button class="nav-item settings-btn" id="btn-settings">
+                    <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <span>Settings</span>
+                </button>
                 <div class="theme-section">
                     <label class="theme-label">Theme</label>
-                    <div class="theme-options">
+                    <div class="theme-options" id="theme-options">
                         <button class="theme-btn active" data-theme="dark" title="Dark">
                             <span class="theme-dot dark-dot"></span>
                         </button>
@@ -50,6 +58,55 @@
                         </button>
                         <button class="theme-btn" data-theme="sunset" title="Sunset">
                             <span class="theme-dot sunset-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="ocean" title="Ocean">
+                            <span class="theme-dot ocean-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="forest" title="Forest">
+                            <span class="theme-dot forest-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="neon" title="Neon">
+                            <span class="theme-dot neon-dot"></span>
+                        </button>
+                    </div>
+                    <div class="theme-options" id="theme-options-2">
+                        <button class="theme-btn" data-theme="monochrome" title="Monochrome">
+                            <span class="theme-dot monochrome-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="candy" title="Candy">
+                            <span class="theme-dot candy-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="midnight" title="Midnight">
+                            <span class="theme-dot midnight-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="ember" title="Ember">
+                            <span class="theme-dot ember-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="arctic" title="Arctic">
+                            <span class="theme-dot arctic-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="cyberpunk" title="Cyberpunk">
+                            <span class="theme-dot cyberpunk-dot"></span>
+                        </button>
+                    </div>
+                    <div class="theme-options" id="theme-options-3">
+                        <button class="theme-btn" data-theme="retro" title="Retro">
+                            <span class="theme-dot retro-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="lavender" title="Lavender">
+                            <span class="theme-dot lavender-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="moss" title="Moss">
+                            <span class="theme-dot moss-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="crimson" title="Crimson">
+                            <span class="theme-dot crimson-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="slate" title="Slate">
+                            <span class="theme-dot slate-dot"></span>
+                        </button>
+                        <button class="theme-btn" data-theme="gold" title="Gold">
+                            <span class="theme-dot gold-dot"></span>
                         </button>
                     </div>
                 </div>
@@ -66,10 +123,11 @@
                         <svg viewBox="0 0 24 24" fill="none" class="search-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                         <input type="text" id="search-input" placeholder="Search tracks, albums, artists..." autofocus>
                         <div class="search-filters">
-                            <label class="filter-chip"><input type="checkbox" value="track" checked> Tracks</label>
-                            <label class="filter-chip"><input type="checkbox" value="album" checked> Albums</label>
-                            <label class="filter-chip"><input type="checkbox" value="artist" checked> Artists</label>
+                            <label class="filter-chip checked"><input type="checkbox" value="track" checked> Tracks</label>
+                            <label class="filter-chip checked"><input type="checkbox" value="album" checked> Albums</label>
+                            <label class="filter-chip checked"><input type="checkbox" value="artist" checked> Artists</label>
                         </div>
+                        <div class="search-history" id="search-history" style="display:none"></div>
                     </div>
                 </div>
                 <div id="search-results" class="search-results">
@@ -84,15 +142,38 @@
             <section id="tab-files" class="tab-content">
                 <div class="tab-header">
                     <h1>Your Files</h1>
-                    <button class="btn-refresh" id="refresh-files">
-                        <svg viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 11-3-6.7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 3v6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                        Refresh
-                    </button>
+                    <div class="tab-header-actions">
+                        <button class="btn-refresh" id="clear-files">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            Clear
+                        </button>
+                        <button class="btn-refresh" id="refresh-files">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 11-3-6.7" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M21 3v6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            Refresh
+                        </button>
+                    </div>
                 </div>
                 <div id="files-list" class="files-grid">
                     <div class="empty-state">
                         <svg viewBox="0 0 24 24" fill="none" class="empty-icon"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><path d="M9 9h6M9 13h6M9 17h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
                         <p>No downloaded files yet</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Playlists Tab -->
+            <section id="tab-playlists" class="tab-content">
+                <div class="tab-header">
+                    <h1>Playlists</h1>
+                    <button class="btn-primary btn-sm" id="btn-new-playlist">
+                        <svg viewBox="0 0 24 24" fill="none" style="width:18px;height:18px"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        New Playlist
+                    </button>
+                </div>
+                <div id="playlists-list" class="playlists-grid">
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" class="empty-icon"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        <p>No playlists yet. Create one to get started!</p>
                     </div>
                 </div>
             </section>
@@ -124,31 +205,161 @@
             </section>
         </main>
 
-        <!-- Player Bar -->
+        <!-- Pill Player Bar -->
         <footer class="player-bar">
             <div class="player-left">
-                <div class="player-cover"></div>
+                <div class="player-cover" id="player-cover"></div>
                 <div class="player-info">
-                    <span class="player-track">No track selected</span>
-                    <span class="player-artist">&nbsp;</span>
+                    <span class="player-track" id="player-track">No track selected</span>
+                    <span class="player-artist" id="player-artist">&nbsp;</span>
                 </div>
             </div>
             <div class="player-center">
                 <div class="player-controls">
-                    <button class="ctrl-btn" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h4v12H6V6zm8 0h4v12h-4V6z"/></svg></button>
-                    <button class="ctrl-btn ctrl-play" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
-                    <button class="ctrl-btn" disabled><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+                    <button class="ctrl-btn ctrl-shuffle" id="btn-shuffle" title="Shuffle">
+                        <svg viewBox="0 0 24 24" fill="none"><path d="M18 4l3 3-3 3M18 20l3-3-3-3M3 7h8a4 4 0 014 4v0M3 17h8a4 4 0 004-4v0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
+                    <button class="ctrl-btn" id="btn-prev" disabled>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h4v12H6V6zm8 0h4v12h-4V6z"/></svg>
+                    </button>
+                    <button class="ctrl-btn ctrl-play" id="btn-play" disabled>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    </button>
+                    <button class="ctrl-btn" id="btn-next" disabled>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+                    </button>
+                    <button class="ctrl-btn ctrl-loop" id="btn-loop" title="Loop">
+                        <svg viewBox="0 0 24 24" fill="none"><path d="M17 2l3 3-3 3M7 22l-3-3 3-3M21 5H10a7 7 0 00-7 7M3 19h11a7 7 0 007-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    </button>
                 </div>
                 <div class="progress-bar">
-                    <span class="time">0:00</span>
-                    <div class="progress-track"><div class="progress-fill"></div></div>
-                    <span class="time">0:00</span>
+                    <span class="time" id="time-current">0:00</span>
+                    <div class="progress-track" id="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+                    <span class="time" id="time-total">0:00</span>
                 </div>
             </div>
             <div class="player-right">
                 <span class="powered-by">Powered by SpotAPI + SpotiFLAC</span>
             </div>
         </footer>
+    </div>
+
+    <!-- Detail View Modal -->
+    <div class="modal-overlay" id="detail-modal" style="display:none">
+        <div class="modal-content">
+            <button class="modal-close" id="modal-close">&times;</button>
+            <div class="detail-header">
+                <img id="detail-cover" class="detail-cover" src="" alt="" onerror="this.style.display='none'">
+                <div class="detail-info">
+                    <span class="detail-type" id="detail-type"></span>
+                    <h1 id="detail-title"></h1>
+                    <p id="detail-subtitle"></p>
+                    <p id="detail-meta"></p>
+                    <div class="detail-actions">
+                        <button class="btn-primary" id="btn-detail-download">
+                            <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                            Download MP3
+                        </button>
+                        <button class="btn-secondary" id="btn-detail-play">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                            Play Preview
+                        </button>
+                        <button class="btn-secondary" id="btn-detail-add-playlist">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                            Add to Playlist
+                        </button>
+                        <button class="btn-secondary" id="btn-detail-open-spotify">
+                            <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/><path d="M16.5 8.5c-2.5-1.5-6.5-1.5-9 0l.5 1c2-1 5.5-1 7.5 0l1-1zM15 11c-2-1-5-1-7 0l.5 1c1.5-.8 4-.8 5.5 0l1-1zM13.5 13.5c-1.5-.8-3.5-.8-5 0l.5 1c1-.5 3-.5 4 0l.5-1z" fill="var(--bg-primary)"/></svg>
+                            Open in Spotify
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="detail-tracks" id="detail-tracks">
+                <h2>Tracks</h2>
+                <div id="detail-tracks-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-overlay" id="settings-modal" style="display:none">
+        <div class="modal-content settings-content">
+            <button class="modal-close" id="settings-close">&times;</button>
+            <h1>Settings</h1>
+            <div class="settings-section">
+                <h3>Theme</h3>
+                <select id="settings-theme" class="input-field">
+                    <option value="dark">Dark</option>
+                    <option value="galactical">Galactical</option>
+                    <option value="sunset">Sunset</option>
+                    <option value="ocean">Ocean</option>
+                    <option value="forest">Forest</option>
+                    <option value="neon">Neon</option>
+                    <option value="monochrome">Monochrome</option>
+                    <option value="candy">Candy</option>
+                    <option value="midnight">Midnight</option>
+                    <option value="ember">Ember</option>
+                    <option value="arctic">Arctic</option>
+                    <option value="cyberpunk">Cyberpunk</option>
+                    <option value="retro">Retro</option>
+                    <option value="lavender">Lavender</option>
+                    <option value="moss">Moss</option>
+                    <option value="crimson">Crimson</option>
+                    <option value="slate">Slate</option>
+                    <option value="gold">Gold</option>
+                </select>
+            </div>
+            <div class="settings-section">
+                <h3>Default Download Quality</h3>
+                <select id="settings-quality" class="input-field">
+                    <option value="LOSSLESS">Lossless (FLAC)</option>
+                    <option value="HIGH">High (320kbps)</option>
+                    <option value="MEDIUM">Medium (160kbps)</option>
+                </select>
+            </div>
+            <div class="settings-section">
+                <h3>Dev Options</h3>
+                <p class="settings-hint">Enter the admin key to unlock developer tools</p>
+                <div style="display:flex;gap:8px">
+                    <input type="password" id="dev-key-input" class="input-field" placeholder="Admin key..." style="flex:1">
+                    <button class="btn-primary btn-sm" id="btn-dev-unlock">Unlock</button>
+                </div>
+            </div>
+            <div class="settings-section dev-section" id="dev-section" style="display:none">
+                <h3>🔧 Developer Tools</h3>
+                <label class="toggle-row">
+                    <span>Show Logs</span>
+                    <input type="checkbox" id="toggle-logs">
+                </label>
+                <label class="toggle-row">
+                    <span>Debug Mode</span>
+                    <input type="checkbox" id="toggle-debug">
+                </label>
+                <label class="toggle-row">
+                    <span>Show API Responses</span>
+                    <input type="checkbox" id="toggle-api-log">
+                </label>
+                <button class="btn-secondary btn-sm" id="btn-clear-storage" style="margin-top:12px">Clear All Local Data</button>
+                <button class="btn-secondary btn-sm" id="btn-export-data" style="margin-top:4px">Export Data as JSON</button>
+                <div id="dev-logs" class="dev-logs" style="display:none">
+                    <h4>Logs</h4>
+                    <div id="dev-logs-content"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add to Playlist Modal -->
+    <div class="modal-overlay" id="playlist-picker-modal" style="display:none">
+        <div class="modal-content modal-sm">
+            <button class="modal-close" id="playlist-picker-close">&times;</button>
+            <h2>Add to Playlist</h2>
+            <div id="playlist-picker-list"></div>
+            <button class="btn-primary btn-sm" id="btn-new-playlist-picker" style="margin-top:12px;width:100%">
+                + Create New Playlist
+            </button>
+        </div>
     </div>
 
     <!-- Toast container -->

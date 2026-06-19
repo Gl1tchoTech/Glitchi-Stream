@@ -2,6 +2,47 @@ from spotapi import Song, Artist
 from app.utils.logger import logger
 
 
+# ── Album tracks lookup ────────────────────────────────────────────
+
+def get_album_tracks(album_id: str) -> list[dict]:
+    """Fetch all tracks for a given album ID via SpotAPI."""
+    logger.info(f"Fetching album tracks for: {album_id}")
+    song = Song()
+    # Use query_songs with the album ID - SpotAPI will resolve it
+    album_data = song.query_songs(f"album:{album_id}", limit=50)
+    search_v2 = album_data.get("data", {}).get("searchV2", {})
+    
+    # Look for tracks matching this album
+    track_items_raw = search_v2.get("tracksV2", {}).get("items", [])
+    tracks = []
+    for wrapper in track_items_raw:
+        item = wrapper.get("item", {})
+        data = item.get("data", {})
+        uri = data.get("uri", "")
+        album_of_track = data.get("albumOfTrack", {})
+        # Filter by album ID
+        album_uri = album_of_track.get("uri", "")
+        if album_id not in album_uri:
+            continue
+        artists_items = data.get("artists", {}).get("items", [])
+        artist_names = ", ".join(
+            a.get("profile", {}).get("name", "")
+            for a in artists_items
+        )
+        cover_sources = album_of_track.get("coverArt", {}).get("sources", [])
+        tracks.append({
+            "name": data.get("name", ""),
+            "id": _uri_to_id(uri),
+            "uri": uri,
+            "artists": artist_names,
+            "album": album_of_track.get("name", ""),
+            "album_image_url": _best_image(cover_sources),
+            "duration_ms": data.get("duration", {}).get("totalMilliseconds", 0),
+            "url": _uri_to_url(uri),
+        })
+    return tracks
+
+
 def _uri_to_url(uri: str) -> str:
     """Convert spotify:track:XXX → https://open.spotify.com/track/XXX"""
     if not uri or ":" not in uri:
