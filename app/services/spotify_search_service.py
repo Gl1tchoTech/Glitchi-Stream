@@ -31,6 +31,9 @@ def get_track_preview_url(track_id: str) -> str | None:
     try:
         song = Song()
         info = song.get_track_info(track_id)
+        if not info or not isinstance(info, dict):
+            logger.warning(f"No track info returned for {track_id}")
+            return None
         track_union = info.get("data", {}).get("trackUnion", {})
 
         urls = _find_audio_urls(track_union)
@@ -55,6 +58,9 @@ def get_album_tracks(album_id: str) -> list[dict]:
     song = Song()
     # Use query_songs with the album ID - SpotAPI will resolve it
     album_data = song.query_songs(f"album:{album_id}", limit=50)
+    if not album_data or not isinstance(album_data, dict):
+        logger.error(f"SpotAPI returned invalid data for album {album_id}")
+        return []
     search_v2 = album_data.get("data", {}).get("searchV2", {})
     
     # Look for tracks matching this album
@@ -129,6 +135,9 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     if "track" in types_requested or "album" in types_requested:
         song = Song()
         song_data = song.query_songs(q, limit=limit)
+        if not song_data or not isinstance(song_data, dict):
+            logger.error(f"SpotAPI query_songs returned invalid data for q='{q}'")
+            return raw
         search_v2 = song_data.get("data", {}).get("searchV2", {})
 
         if "track" in types_requested:
@@ -190,6 +199,9 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     if "artist" in types_requested:
         artist = Artist()
         artist_data = artist.query_artists(q, limit=limit)
+        if not artist_data or not isinstance(artist_data, dict):
+            logger.error(f"SpotAPI query_artists returned invalid data for q='{q}'")
+            return raw
         search_v2 = artist_data.get("data", {}).get("searchV2", {})
         artist_items_raw = search_v2.get("artists", {}).get("items", [])
 
