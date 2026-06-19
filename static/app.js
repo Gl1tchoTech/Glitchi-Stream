@@ -284,9 +284,10 @@ function setupResultCardDelegation() {
             const artist = card.dataset.artist;
             const cover = card.dataset.cover;
             const url = card.dataset.url;
+            const trackId = card.dataset.id;
             if (track) {
                 updatePlayerUI(track, artist, cover);
-                downloadAndPlay(url, track, artist, cover);
+                downloadAndPlay(url, track, artist, cover, trackId);
             }
             return;
         }
@@ -369,7 +370,7 @@ function openDetailView(item) {
     btnPlay.onclick = () => {
         if (item.url) {
             updatePlayerUI(item.name, item.artists, item.cover);
-            downloadAndPlay(item.url, item.name, item.artists, item.cover);
+            downloadAndPlay(item.url, item.name, item.artists, item.cover, item.id);
         }
     };
     btnAddPlaylist.onclick = () => openPlaylistPicker(item);
@@ -390,7 +391,7 @@ async function fetchAlbumTracks(albumId, coverUrl) {
         if (data.tracks && data.tracks.length > 0) {
             listEl.innerHTML = data.tracks.map((t, i) => {
                 const img = t.album_image_url || coverUrl;
-                return `<div class="track-row" data-url="${escapeHtml(t.url)}" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(img)}">
+                return `<div class="track-row" data-url="${escapeHtml(t.url)}" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(img)}" data-trackid="${escapeHtml(t.id || '')}">
                     <span class="track-num">${i + 1}</span>
                     ${img ? `<img class="track-cover" src="${escapeHtml(img)}" alt="" onerror="this.remove()">` : ''}
                     <div class="track-info">
@@ -412,7 +413,7 @@ async function fetchAlbumTracks(albumId, coverUrl) {
                     }
                     updatePlayerUI(row.dataset.name, row.dataset.artist, row.dataset.cover);
                     if (row.dataset.url) {
-                        downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover);
+                        downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover, row.dataset.trackid || '');
                     }
                 });
             });
@@ -655,19 +656,19 @@ function setupFileCardDelegation() {
     });
 }
 
-function playFile(filename) {
+function playFile(filename, seekTime = 0, displayName = null, displayArtist = null) {
     if (state.currentAudio) {
         state.currentAudio.pause();
         state.currentAudio.remove();
         state.currentAudio = null;
     }
 
-    devLog('Playing file', { filename });
+    devLog('Playing file', { filename, seekTime });
     const audio = new Audio(`/files/stream?filename=${encodeURIComponent(filename)}`);
     audio.addEventListener('loadedmetadata', () => {
         updatePlayerUI(
-            filename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' '),
-            'Local File',
+            displayName || filename.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' '),
+            displayArtist || 'Local File',
             null
         );
         state.currentFilename = filename;
@@ -677,6 +678,9 @@ function playFile(filename) {
         document.getElementById('btn-prev').disabled = false;
         document.getElementById('btn-next').disabled = false;
         updateTimeDisplay(audio);
+        if (seekTime > 0 && audio.duration) {
+            audio.currentTime = Math.min(seekTime, audio.duration);
+        }
     });
     audio.addEventListener('timeupdate', () => updateTimeDisplay(audio));
     audio.addEventListener('ended', () => {
@@ -1112,7 +1116,7 @@ function openPlaylistView(playlist) {
     } else {
         listEl.innerHTML = playlist.tracks.map((t, i) => {
             const img = t.cover ? `<img class="track-cover" src="${escapeHtml(t.cover)}" alt="" onerror="this.remove()">` : '';
-            return `<div class="track-row" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.cover)}" data-url="${escapeHtml(t.url)}">
+            return `<div class="track-row" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.cover)}" data-url="${escapeHtml(t.url)}" data-trackid="${escapeHtml(t.trackId || '')}">`;
                 <span class="track-num">${i + 1}</span>
                 ${img}
                 <div class="track-info">
@@ -1153,7 +1157,7 @@ function openPlaylistView(playlist) {
                 if (e.target.closest('.track-remove') || e.target.closest('.track-dl')) return;
                 updatePlayerUI(row.dataset.name, row.dataset.artist, row.dataset.cover);
                 if (row.dataset.url) {
-                    downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover);
+                    downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover, row.dataset.trackid || '');
                 }
             });
         });
@@ -1262,6 +1266,7 @@ function openPlaylistPicker(item) {
                         artists: item.artists,
                         cover: item.cover,
                         url: item.url,
+                        trackId: item.id || '',
                         duration: item.duration || '',
                         album: item.album || '',
                         addedAt: Date.now(),
@@ -1277,11 +1282,10 @@ function openPlaylistPicker(item) {
     document.getElementById('playlist-picker-modal').style.display = 'flex';
 }
 
-// ===== Download & Play (downloads track then streams it) =====
-// Abort controller: cancel any in-progress download-and-play when a new one starts
+// ===== Download & Play (streams preview immediately, downloads full track) =====
 let _playDownloadAbort = null;
 
-async function downloadAndPlay(url, trackName, artistName, coverUrl) {
+async function downloadAndPlay(url, trackName, artistName, coverUrl, trackId) {
     if (!url) {
         showToast('No Spotify URL available to play', 'error');
         return;
@@ -1295,7 +1299,7 @@ async function downloadAndPlay(url, trackName, artistName, coverUrl) {
     const abort = { aborted: false };
     _playDownloadAbort = abort;
 
-    // 1. Check if the file already exists in downloads
+    // 1. Try existing downloaded file first
     if (!abort.aborted) {
         const existingFile = await findMatchingFile(trackName, artistName);
         if (existingFile) {
@@ -1304,36 +1308,87 @@ async function downloadAndPlay(url, trackName, artistName, coverUrl) {
             return;
         }
     }
-
     if (abort.aborted) return;
 
-    // 2. Queue the download
-    showToast(`Downloading "${trackName}"...`, 'info');
-    devLog('Queuing download for play', { url, track: trackName });
+    // 2. Try to stream the Spotify preview IMMEDIATELY
+    let previewPlaying = false;
+    let previewCurrentTime = 0;
+    if (trackId) {
+        const previewUrl = `/files/stream/preview/${encodeURIComponent(trackId)}`;
+        devLog('Trying preview stream', { trackId, previewUrl });
+        // Play the preview directly - if it fails, Audio error event handles it gracefully
+        if (state.currentAudio) {
+            state.currentAudio.pause();
+            state.currentAudio.remove();
+            state.currentAudio = null;
+        }
+        const audio = new Audio(previewUrl);
+        let previewStarted = false;
+        audio.addEventListener('loadedmetadata', () => {
+            state.currentFilename = null; // preview mode
+            state.isPlaying = true;
+            previewStarted = true;
+            updatePlayButton();
+            document.getElementById('btn-play').disabled = false;
+            document.getElementById('btn-prev').disabled = false;
+            document.getElementById('btn-next').disabled = false;
+            updateTimeDisplay(audio);
+        });
+        audio.addEventListener('timeupdate', () => {
+            updateTimeDisplay(audio);
+            previewCurrentTime = audio.currentTime;
+        });
+        audio.addEventListener('ended', () => {
+            if (state.loop && previewStarted) {
+                audio.currentTime = 0;
+                audio.play().catch(() => {});
+            } else if (!state.loop) {
+                playNextInQueue();
+            }
+        });
+        audio.addEventListener('error', () => {
+            devLog('Preview not available, will download instead', { trackId });
+            if (state.currentAudio === audio) {
+                state.currentAudio = null;
+                state.isPlaying = false;
+                updatePlayButton();
+            }
+        });
+        audio.play().then(() => {
+            previewPlaying = true;
+            showToast(`Streaming "${trackName}"...`, 'info');
+        }).catch(() => {
+            devLog('Preview play blocked', { trackId });
+        });
+        state.currentAudio = audio;
+    }
+
+    // 3. Queue the full download in the background
+    devLog('Queuing background download', { url, track: trackName });
     try {
         const res = await fetch('/download/', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, quality: state.defaultQuality }),
         });
-        if (!res.ok) {
+        if (!res.ok && !previewPlaying) {
             const err = await res.json().catch(() => ({ detail: 'Download failed' }));
             showToast(err.detail || 'Download failed', 'error');
             devLog('Play download rejected', { status: res.status, error: err.detail });
             return;
         }
     } catch (e) {
-        showToast('Failed to start download', 'error');
+        if (!previewPlaying) showToast('Failed to start download', 'error');
         devLog('Play download error', { error: e.message });
         return;
     }
 
     if (abort.aborted) return;
 
-    // 3. Poll for the file to appear (up to 90 seconds, every 3s)
+    // 4. Poll for the full file to appear (so we can switch from preview to full)
     const startTime = Date.now();
-    const timeout = 90000;
-    const pollInterval = 3000;
+    const timeout = 120000;
+    const pollInterval = 5000;
 
     while (Date.now() - startTime < timeout) {
         if (abort.aborted) return;
@@ -1341,13 +1396,14 @@ async function downloadAndPlay(url, trackName, artistName, coverUrl) {
         if (abort.aborted) return;
         const found = await findMatchingFile(trackName, artistName);
         if (found) {
-            devLog('File appeared after download', { filename: found, waited: Date.now() - startTime });
-            playFile(found);
+            devLog('Full file appeared, switching from preview', { filename: found, waited: Date.now() - startTime });
+            const wasPlaying = state.isPlaying && previewPlaying;
+            playFile(found, wasPlaying ? previewCurrentTime : 0, trackName, artistName);
             return;
         }
     }
 
-    if (!abort.aborted) {
+    if (!abort.aborted && !previewPlaying) {
         showToast(`Download timed out for "${trackName}"`, 'error');
         devLog('Play download timed out', { track: trackName });
     }

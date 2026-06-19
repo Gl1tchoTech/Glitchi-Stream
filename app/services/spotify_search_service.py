@@ -4,6 +4,51 @@ from app.utils.logger import logger
 
 # ── Album tracks lookup ────────────────────────────────────────────
 
+def _find_audio_urls(obj) -> list[str]:
+    """Recursively search for any HTTP URLs that look like audio/preview URLs."""
+    results = []
+    if isinstance(obj, dict):
+        for v in obj.values():
+            results.extend(_find_audio_urls(v))
+    elif isinstance(obj, list):
+        for v in obj:
+            results.extend(_find_audio_urls(v))
+    elif isinstance(obj, str):
+        if obj.startswith("http") and any(
+            frag in obj.lower()
+            for frag in ("preview", "audio", "mp3", "aac", "ogg", "stream", "p.scdn", "audio-ak")
+        ):
+            results.append(obj)
+    return results
+
+
+def get_track_preview_url(track_id: str) -> str | None:
+    """
+    Get a playable audio URL for a track using SpotAPI.
+    Recursively searches the track data for audio/preview URLs.
+    """
+    logger.info(f"Getting preview URL for track: {track_id}")
+    try:
+        song = Song()
+        info = song.get_track_info(track_id)
+        track_union = info.get("data", {}).get("trackUnion", {})
+
+        urls = _find_audio_urls(track_union)
+        if urls:
+            logger.info(f"Found {len(urls)} audio URLs for {track_id}")
+            for url in urls:
+                if "mp3" in url.lower() or "preview" in url.lower():
+                    return url
+            return urls[0]
+
+        logger.warning(f"No preview URL found for track {track_id}")
+        return None
+
+    except Exception as e:
+        logger.error(f"Error getting preview URL for {track_id}: {e}")
+        return None
+
+
 def get_album_tracks(album_id: str) -> list[dict]:
     """Fetch all tracks for a given album ID via SpotAPI."""
     logger.info(f"Fetching album tracks for: {album_id}")

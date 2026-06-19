@@ -1,8 +1,9 @@
 import os
 import mimetypes
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from app.services.file_service import get_downloaded_files, get_file_path
+from app.services.spotify_search_service import get_track_preview_url
 from app.models.responses import FileListResponse
 
 router = APIRouter(prefix="/files", tags=["Files"])
@@ -139,6 +140,22 @@ async def stream_file(
             "Content-Disposition": "inline",
         },
     )
+
+
+@router.get("/stream/preview/{track_id}")
+async def stream_preview(track_id: str):
+    """
+    Get a playable audio URL for a Spotify track preview.
+    Returns a redirect to Spotify's CDN preview URL.
+    """
+    preview_url = get_track_preview_url(track_id)
+    if not preview_url:
+        raise HTTPException(
+            status_code=404,
+            detail="No preview available for this track. Try downloading it first.",
+        )
+
+    return RedirectResponse(url=preview_url, status_code=302)
 
 
 @router.get("/download/{filename:path}")
