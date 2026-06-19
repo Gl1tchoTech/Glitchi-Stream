@@ -1,4 +1,4 @@
-from spotapi import Song, Artist
+from spotapi import Song, Artist, Playlist
 from app.utils.logger import logger
 
 
@@ -121,6 +121,43 @@ def _best_image(sources: list) -> str:
     return best.get("url", "")
 
 
+def search_playlists_spotify(q: str, limit: int = 20) -> list[dict]:
+    """Search for playlists using SpotAPI."""
+    logger.info(f"SpotAPI playlist search: q='{q}' limit={limit}")
+    try:
+        playlist = Playlist()
+        results = playlist.search(q, limit=limit)
+        if not results or not isinstance(results, dict):
+            logger.warning(f"SpotAPI playlist search returned no results for q='{q}'")
+            return []
+
+        # The response structure: data.searchV2.playlists.items[]
+        search_v2 = results.get("data", {}).get("searchV2", {})
+        playlist_items_raw = search_v2.get("playlists", {}).get("items", [])
+
+        items = []
+        for wrapper in playlist_items_raw:
+            data = wrapper.get("data", {})
+            uri = data.get("uri", "")
+            owner_data = data.get("owner", {})
+            owner_name = owner_data.get("name", "") if isinstance(owner_data, dict) else ""
+            cover_sources = data.get("coverArt", {}).get("sources", [])
+            items.append({
+                "name": data.get("name", ""),
+                "id": _uri_to_id(uri),
+                "description": data.get("description", "") or "",
+                "image_url": _best_image(cover_sources),
+                "url": _uri_to_url(uri),
+                "tracks_count": data.get("totalTracks", 0),
+                "owner": owner_name,
+            })
+        logger.info(f"Found {len(items)} playlists for q='{q}'")
+        return items
+    except Exception as e:
+        logger.error(f"Playlist search error for q='{q}': {type(e).__name__}: {e}")
+        return []
+
+
 def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     """
     Search Spotify via SpotAPI (no credentials needed).
@@ -224,5 +261,11 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
                 "url": _uri_to_url(uri),
             })
         raw["artists"] = {"items": artist_items}
+
+    # Playlist search via Playlist.search
+    if "playlist" in types_requested:
+        playlist_items = search_playlists_spotify(q, limit=limit)
+        if playlist_items:
+            raw["playlists"] = {"items": playlist_items}
 
     return raw

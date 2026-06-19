@@ -121,30 +121,31 @@ function showToast(message, type = 'info') {
     }, 3500);
 }
 
-// ===== Filter Chips =====
+// ===== Filter Chips (Single-select, like Spotify) =====
+let _activeFilter = 'all';
+
 function setupFilterChips() {
-    document.querySelectorAll('.filter-chip input').forEach(input => {
-        input.addEventListener('change', () => {
-            input.closest('.filter-chip').classList.toggle('checked', input.checked);
+    document.querySelectorAll('.filter-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+            document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+            chip.classList.add('active');
+            _activeFilter = chip.dataset.filter;
+            // Re-run search if there's a query
+            const input = document.getElementById('search-input');
+            if (input.value.trim().length > 0) doSearch();
         });
-        input.closest('.filter-chip').classList.toggle('checked', input.checked);
     });
 }
 
 // ===== Search =====
 function setupSearch() {
     const input = document.getElementById('search-input');
-    const filters = document.querySelectorAll('.filter-chip input');
     let debounceTimer;
 
     input.addEventListener('input', () => {
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(doSearch, 400);
     });
-
-    filters.forEach(f => f.addEventListener('change', () => {
-        if (input.value.trim().length > 0) doSearch();
-    }));
 
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
@@ -160,9 +161,8 @@ function setupSearch() {
 }
 
 function getActiveTypes() {
-    const checked = document.querySelectorAll('.filter-chip input:checked');
-    if (checked.length === 0) return 'track,album,artist';
-    return Array.from(checked).map(c => c.value).join(',');
+    if (_activeFilter === 'all') return 'track,album,artist,playlist';
+    return _activeFilter;
 }
 
 function formatDuration(ms) {
@@ -200,7 +200,7 @@ async function doSearch() {
             throw new Error(err.detail || 'Search failed');
         }
         const data = await res.json();
-        if (state.showApiLog) devLog('Search results', { tracks: data.tracks?.length, albums: data.albums?.length, artists: data.artists?.length });
+        if (state.showApiLog) devLog('Search results', { tracks: data.tracks?.length, albums: data.albums?.length, artists: data.artists?.length, playlists: data.playlists?.length });
         renderSearchResults(data, query);
     } catch (e) {
         devLog('Search error', { error: e.message });
@@ -337,9 +337,9 @@ function openDetailView(item) {
         coverEl.style.display = 'none';
     }
 
-    // Hide tracks section for artists
+    // Hide tracks section for artists and playlists
     const tracksSection = document.getElementById('detail-tracks');
-    if (item.type === 'artist') {
+    if (item.type === 'artist' || item.type === 'playlist') {
         tracksSection.style.display = 'none';
     } else {
         tracksSection.style.display = '';
@@ -362,6 +362,13 @@ function openDetailView(item) {
     btnPlay.style.display = '';
     btnAddPlaylist.style.display = '';
     btnOpenSpotify.style.display = '';
+
+    // Playlists can't be downloaded/played directly via SpotiFLAC
+    if (item.type === 'playlist') {
+        btnDownload.style.display = 'none';
+        btnPlay.style.display = 'none';
+        btnAddPlaylist.style.display = 'none';
+    }
 
     btnDownload.onclick = () => {
         if (item.url) downloadFromDetail(item.url);
@@ -427,24 +434,39 @@ async function fetchAlbumTracks(albumId, coverUrl) {
 }
 
 async function downloadFromDetail(url) {
-    showToast('Starting download...', 'info');
-    devLog('Download from detail', { url });
+    showToast('Downloading...', 'info');
+    devLog('Direct download from detail', { url });
     try {
-        const res = await fetch('/download/', {
+        const res = await fetch('/download/now', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, quality: state.defaultQuality }),
         });
-        const data = await res.json();
-        if (res.ok) {
-            showToast(data.message || 'Download queued!', 'success');
-            addDownloadedFile(url);
-        } else {
-            showToast(data.detail || 'Download failed', 'error');
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Download failed' }));
+            showToast(err.detail || 'Download failed', 'error');
+            return;
         }
+        // Get the blob and trigger browser download
+        const blob = await res.blob();
+        const disposition = res.headers.get('Content-Disposition') || '';
+        let filename = 'download.mp3';
+        const fnameMatch = disposition.match(/filename="?([^";\n]+)"?/);
+        if (fnameMatch) filename = fnameMatch[1];
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        showToast('Download complete!', 'success');
+        devLog('Direct download complete', { filename });
+        // Refresh files list
+        setTimeout(() => loadFiles(), 1000);
     } catch (e) {
-        showToast('Network error', 'error');
-        devLog('Download error', { error: e.message });
+        showToast('Download failed', 'error');
+        devLog('Direct download error', { error: e.message });
     }
 }
 
@@ -908,7 +930,23 @@ function renderSearchResults(data, query) {
         html += '</div></div>';
     }
 
-    if (!data.tracks?.length && !data.albums?.length && !data.artists?.length) {
+    if (data.playlists && data.playlists.length > 0) {
+        html += `<div class="result-section"><h2>Playlists <span class="count">${data.playlists.length} results</span></h2><div class="results-grid">`;
+        data.playlists.forEach(pl => {
+            const imgHtml = pl.image_url
+                ? `<img src="${escapeHtml(pl.image_url)}" alt="" class="card-cover" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="card-cover-placeholder" style="display:none"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
+                : '<div class="card-cover-placeholder"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>';
+            html += `<div class="card" data-type="playlist" data-id="${escapeHtml(pl.id)}" data-title="${escapeHtml(pl.name)}" data-artist="${escapeHtml(pl.owner)}" data-cover="${escapeHtml(pl.image_url)}" data-url="${escapeHtml(pl.url)}" data-tracks="${pl.tracks_count}">
+                ${imgHtml}
+                <div class="card-title">${escapeHtml(pl.name)}</div>
+                <div class="card-subtitle">By ${escapeHtml(pl.owner)}</div>
+                <div class="card-meta">${pl.tracks_count} tracks</div>
+            </div>`;
+        });
+        html += '</div></div>';
+    }
+
+    if (!data.tracks?.length && !data.albums?.length && !data.artists?.length && !data.playlists?.length) {
         html = `<div class="empty-state">
             <svg viewBox="0 0 24 24" fill="none" class="empty-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             <p>No results found for "${escapeHtml(query)}"</p></div>`;
@@ -1282,7 +1320,7 @@ function openPlaylistPicker(item) {
     document.getElementById('playlist-picker-modal').style.display = 'flex';
 }
 
-// ===== Download & Play (streams preview immediately, downloads full track) =====
+// ===== Download & Play (full song streaming, no 30s preview) =====
 let _playDownloadAbort = null;
 
 async function downloadAndPlay(url, trackName, artistName, coverUrl, trackId) {
@@ -1304,91 +1342,44 @@ async function downloadAndPlay(url, trackName, artistName, coverUrl, trackId) {
         const existingFile = await findMatchingFile(trackName, artistName);
         if (existingFile) {
             devLog('Found existing file for play', { filename: existingFile, track: trackName });
-            playFile(existingFile);
+            playFile(existingFile, 0, trackName, artistName);
             return;
         }
     }
     if (abort.aborted) return;
 
-    // 2. Try to stream the Spotify preview IMMEDIATELY
-    let previewPlaying = false;
-    let previewCurrentTime = 0;
-    if (trackId) {
-        const previewUrl = `/files/stream/preview/${encodeURIComponent(trackId)}`;
-        devLog('Trying preview stream', { trackId, previewUrl });
-        // Play the preview directly - if it fails, Audio error event handles it gracefully
-        if (state.currentAudio) {
-            state.currentAudio.pause();
-            state.currentAudio.remove();
-            state.currentAudio = null;
-        }
-        const audio = new Audio(previewUrl);
-        let previewStarted = false;
-        audio.addEventListener('loadedmetadata', () => {
-            state.currentFilename = null; // preview mode
-            state.isPlaying = true;
-            previewStarted = true;
-            updatePlayButton();
-            document.getElementById('btn-play').disabled = false;
-            document.getElementById('btn-prev').disabled = false;
-            document.getElementById('btn-next').disabled = false;
-            updateTimeDisplay(audio);
-        });
-        audio.addEventListener('timeupdate', () => {
-            updateTimeDisplay(audio);
-            previewCurrentTime = audio.currentTime;
-        });
-        audio.addEventListener('ended', () => {
-            if (state.loop && previewStarted) {
-                audio.currentTime = 0;
-                audio.play().catch(() => {});
-            } else if (!state.loop) {
-                playNextInQueue();
-            }
-        });
-        audio.addEventListener('error', () => {
-            devLog('Preview not available, will download instead', { trackId });
-            if (state.currentAudio === audio) {
-                state.currentAudio = null;
-                state.isPlaying = false;
-                updatePlayButton();
-            }
-        });
-        audio.play().then(() => {
-            previewPlaying = true;
-            showToast(`Streaming "${trackName}"...`, 'info');
-        }).catch(() => {
-            devLog('Preview play blocked', { trackId });
-        });
-        state.currentAudio = audio;
-    }
+    // 2. Show loading state in player
+    document.getElementById('player-track').textContent = `Loading "${trackName}"...`;
+    document.getElementById('player-artist').textContent = artistName || '';
 
-    // 3. Queue the full download in the background
-    devLog('Queuing background download', { url, track: trackName });
+    // 3. Queue the download in the background
+    devLog('Starting background download for play', { url, track: trackName });
+    showToast(`Downloading "${trackName}" for playback...`, 'info');
+
     try {
         const res = await fetch('/download/', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url, quality: state.defaultQuality }),
         });
-        if (!res.ok && !previewPlaying) {
+        if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: 'Download failed' }));
             showToast(err.detail || 'Download failed', 'error');
             devLog('Play download rejected', { status: res.status, error: err.detail });
             return;
         }
     } catch (e) {
-        if (!previewPlaying) showToast('Failed to start download', 'error');
+        showToast('Failed to start download', 'error');
         devLog('Play download error', { error: e.message });
         return;
     }
 
     if (abort.aborted) return;
 
-    // 4. Poll for the full file to appear (so we can switch from preview to full)
+    // 4. Poll for the full file to appear
     const startTime = Date.now();
-    const timeout = 120000;
-    const pollInterval = 5000;
+    const timeout = 180000; // 3 minutes max
+    const pollInterval = 3000;
 
     while (Date.now() - startTime < timeout) {
         if (abort.aborted) return;
@@ -1396,14 +1387,23 @@ async function downloadAndPlay(url, trackName, artistName, coverUrl, trackId) {
         if (abort.aborted) return;
         const found = await findMatchingFile(trackName, artistName);
         if (found) {
-            devLog('Full file appeared, switching from preview', { filename: found, waited: Date.now() - startTime });
-            const wasPlaying = state.isPlaying && previewPlaying;
-            playFile(found, wasPlaying ? previewCurrentTime : 0, trackName, artistName);
+            devLog('Full file ready for playback', { filename: found, waited: ((Date.now() - startTime) / 1000).toFixed(1) + 's' });
+            // Update downloaded files state
+            if (!state.downloadedFiles.find(df => df.filename === found)) {
+                state.downloadedFiles.unshift({
+                    filename: found,
+                    size_mb: 0,
+                    extension: found.split('.').pop() || '',
+                    downloadedAt: Date.now(),
+                });
+                saveDownloadedFiles();
+            }
+            playFile(found, 0, trackName, artistName);
             return;
         }
     }
 
-    if (!abort.aborted && !previewPlaying) {
+    if (!abort.aborted) {
         showToast(`Download timed out for "${trackName}"`, 'error');
         devLog('Play download timed out', { track: trackName });
     }

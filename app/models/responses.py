@@ -45,8 +45,19 @@ class Track(BaseModel):
     url: str = ""
 
 
+class Playlist(BaseModel):
+    name: str
+    id: str = ""
+    description: str = ""
+    image_url: str = ""
+    url: str = ""
+    tracks_count: int = 0
+    owner: str = ""
+
+
 class SearchResults(BaseModel):
     tracks: List[Track] = []
     albums: List[Album] = []
     artists: List[Artist] = []
+    playlists: List[Playlist] = []
     query: str = ""

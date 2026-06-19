@@ -7,7 +7,7 @@ from app.utils.logger import logger
 from app.models.requests import DownloadRequest
 
 
-def _find_spotiflac() -> str | None:
+def find_spotiflac() -> str | None:
     """Find the spotiflac binary on the system."""
     # Try direct command name first
     binary = shutil.which("spotiflac")
@@ -31,7 +31,7 @@ async def execute_download(req: DownloadRequest) -> None:
     logger.info(f"Starting download: {req.url}")
 
     # Pre-flight: check if spotiflac is available
-    spotiflac_bin = _find_spotiflac()
+    spotiflac_bin = find_spotiflac()
     if not spotiflac_bin:
         logger.error(
             "SpotiFLAC binary not found in PATH. "
@@ -86,7 +86,7 @@ async def execute_download(req: DownloadRequest) -> None:
             out_msg = stdout.decode().strip()
             logger.info(f"Download complete: {req.url} — {out_msg}")
             # Look for the downloaded file to confirm
-            _log_downloaded_files()
+            log_downloaded_files()
 
     except FileNotFoundError:
         logger.error(
@@ -97,7 +97,7 @@ async def execute_download(req: DownloadRequest) -> None:
         logger.error(f"Download error for {req.url}: {type(e).__name__}: {e}")
 
 
-def _log_downloaded_files():
+def log_downloaded_files():
     """Log what files are currently in the download directory."""
     try:
         files = os.listdir(settings.DOWNLOAD_DIR)

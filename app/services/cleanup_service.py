@@ -1,23 +1,38 @@
 import asyncio
 import os
-import time
 from app.config import settings
 from app.utils.logger import logger
 
+# Extensions that indicate temporary/incomplete downloads
+_TEMP_EXTENSIONS = {
+    ".tmp", ".part", ".crdownload", ".partial", ".download",
+    ".incomplete", ".spotdl", ".temp", ".tmpfile", ".frag",
+}
+
 
 async def start_cleanup_task():
-    while True:
-        try:
-            now = time.time()
-            cutoff = now - (settings.CLEANUP_AGE_HOURS * 3600)
-            for root, _, files in os.walk(settings.DOWNLOAD_DIR):
-                for f in files:
-                    if f == ".gitkeep":
-                        continue
+    """
+    Clean up temp/incomplete files once at startup.
+    Full downloaded audio files persist until the server is restarted.
+    """
+    try:
+        removed = 0
+        for root, _, files in os.walk(settings.DOWNLOAD_DIR):
+            for f in files:
+                if f == ".gitkeep":
+                    continue
+                _, ext = os.path.splitext(f)
+                ext = ext.lower()
+                # Only clean temporary/incomplete files, NOT completed audio files
+                if ext in _TEMP_EXTENSIONS:
                     path = os.path.join(root, f)
-                    if os.path.getmtime(path) < cutoff:
-                        os.remove(path)
-                        logger.info(f"Cleaned up old file: {f}")
-        except Exception as e:
-            logger.error(f"Cleanup error: {e}")
-        await asyncio.sleep(3600)
+                    os.remove(path)
+                    removed += 1
+                    logger.info(f"Cleaned up temp file: {f}")
+        if removed > 0:
+            logger.info(f"Startup cleanup complete: removed {removed} temp file(s)")
+        else:
+            logger.info("Startup cleanup: no temp files to remove")
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+    # Task exits after one run — downloaded audio files persist until next restart

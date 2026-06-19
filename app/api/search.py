@@ -4,6 +4,7 @@ from app.models.responses import (
     Track,
     Album,
     Artist,
+    Playlist,
 )
 from app.services.spotify_search_service import search_spotify
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/search", tags=["Search"])
 @router.get("/", response_model=SearchResults)
 async def search(
     q: str = Query(..., description="Search query", min_length=1),
-    type: str = Query("track,album,artist", description="Types: track,album,artist"),
+    type: str = Query("track,album,artist,playlist", description="Types: track,album,artist,playlist"),
     limit: int = Query(20, ge=1, le=50),
     market: str = Query("US", min_length=2, max_length=2),
 ):
@@ -64,6 +65,20 @@ async def search(
                     genres=ar.get("genres", ""),
                     image_url=ar.get("image_url", ""),
                     url=ar.get("url", ""),
+                )
+            )
+
+    if "playlists" in raw:
+        for pl in raw["playlists"]["items"]:
+            results.playlists.append(
+                Playlist(
+                    name=pl.get("name", ""),
+                    id=pl.get("id", ""),
+                    description=pl.get("description", ""),
+                    image_url=pl.get("image_url", ""),
+                    url=pl.get("url", ""),
+                    tracks_count=pl.get("tracks_count", 0),
+                    owner=pl.get("owner", ""),
                 )
             )
 
