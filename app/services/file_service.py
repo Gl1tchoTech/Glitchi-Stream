@@ -10,6 +10,9 @@ def get_downloaded_files() -> List[FileItem]:
         for f in filenames:
             if f == ".gitkeep":
                 continue
+            # Skip temporary/incomplete files
+            if f.endswith((".tmp", ".part", ".crdownload", ".partial")):
+                continue
             abs_path = os.path.join(root, f)
             rel_path = os.path.relpath(abs_path, settings.DOWNLOAD_DIR)
             size_mb = os.path.getsize(abs_path) / (1024 * 1024)

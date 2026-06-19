@@ -244,12 +244,13 @@ function setupResultCardDelegation() {
 
         // If play button was clicked on a track card
         if (e.target.closest('.card-play')) {
-            const track = card.dataset.track;
+            const track = card.dataset.track || card.dataset.title;
             const artist = card.dataset.artist;
             const cover = card.dataset.cover;
+            const url = card.dataset.url;
             if (track) {
                 updatePlayerUI(track, artist, cover);
-                showToast(`Selected: ${track}`, 'info');
+                downloadAndPlay(url, track, artist, cover);
             }
             return;
         }
@@ -332,7 +333,7 @@ function openDetailView(item) {
     btnPlay.onclick = () => {
         if (item.url) {
             updatePlayerUI(item.name, item.artists, item.cover);
-            showToast(`Selected: ${item.name}`, 'info');
+            downloadAndPlay(item.url, item.name, item.artists, item.cover);
         }
     };
     btnAddPlaylist.onclick = () => openPlaylistPicker(item);
@@ -374,6 +375,9 @@ async function fetchAlbumTracks(albumId, coverUrl) {
                         return;
                     }
                     updatePlayerUI(row.dataset.name, row.dataset.artist, row.dataset.cover);
+                    if (row.dataset.url) {
+                        downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover);
+                    }
                 });
             });
         } else {
@@ -1112,6 +1116,9 @@ function openPlaylistView(playlist) {
             row.addEventListener('click', (e) => {
                 if (e.target.closest('.track-remove') || e.target.closest('.track-dl')) return;
                 updatePlayerUI(row.dataset.name, row.dataset.artist, row.dataset.cover);
+                if (row.dataset.url) {
+                    downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover);
+                }
             });
         });
     }
@@ -1232,6 +1239,120 @@ function openPlaylistPicker(item) {
         });
     }
     document.getElementById('playlist-picker-modal').style.display = 'flex';
+}
+
+// ===== Download & Play (downloads track then streams it) =====
+// Abort controller: cancel any in-progress download-and-play when a new one starts
+let _playDownloadAbort = null;
+
+async function downloadAndPlay(url, trackName, artistName, coverUrl) {
+    if (!url) {
+        showToast('No Spotify URL available to play', 'error');
+        return;
+    }
+
+    // Abort any previous download-and-play operation
+    if (_playDownloadAbort) {
+        _playDownloadAbort.aborted = true;
+        devLog('Aborted previous download-and-play');
+    }
+    const abort = { aborted: false };
+    _playDownloadAbort = abort;
+
+    // 1. Check if the file already exists in downloads
+    if (!abort.aborted) {
+        const existingFile = await findMatchingFile(trackName, artistName);
+        if (existingFile) {
+            devLog('Found existing file for play', { filename: existingFile, track: trackName });
+            playFile(existingFile);
+            return;
+        }
+    }
+
+    if (abort.aborted) return;
+
+    // 2. Queue the download
+    showToast(`Downloading "${trackName}"...`, 'info');
+    devLog('Queuing download for play', { url, track: trackName });
+    try {
+        const res = await fetch('/download/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url, quality: state.defaultQuality }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Download failed' }));
+            showToast(err.detail || 'Download failed', 'error');
+            devLog('Play download rejected', { status: res.status, error: err.detail });
+            return;
+        }
+    } catch (e) {
+        showToast('Failed to start download', 'error');
+        devLog('Play download error', { error: e.message });
+        return;
+    }
+
+    if (abort.aborted) return;
+
+    // 3. Poll for the file to appear (up to 90 seconds, every 3s)
+    const startTime = Date.now();
+    const timeout = 90000;
+    const pollInterval = 3000;
+
+    while (Date.now() - startTime < timeout) {
+        if (abort.aborted) return;
+        await new Promise(r => setTimeout(r, pollInterval));
+        if (abort.aborted) return;
+        const found = await findMatchingFile(trackName, artistName);
+        if (found) {
+            devLog('File appeared after download', { filename: found, waited: Date.now() - startTime });
+            playFile(found);
+            return;
+        }
+    }
+
+    if (!abort.aborted) {
+        showToast(`Download timed out for "${trackName}"`, 'error');
+        devLog('Play download timed out', { track: trackName });
+    }
+}
+
+async function findMatchingFile(trackName, artistName) {
+    try {
+        const res = await fetch('/files/');
+        if (!res.ok) return null;
+        const data = await res.json();
+        const files = data.files || [];
+
+        // Build search words from track name and artist
+        const trackWords = trackName.toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+        const artistWords = (artistName || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+
+        // Score each file: track word matches + artist word matches
+        let bestMatch = null;
+        let bestScore = 0;
+
+        for (const f of files) {
+            const fn = f.filename.toLowerCase();
+            let score = 0;
+            // Must match at least half of track words
+            const trackMatches = trackWords.filter(w => fn.includes(w)).length;
+            const trackRatio = trackWords.length > 0 ? trackMatches / trackWords.length : 0;
+            if (trackRatio < 0.5) continue;
+            score += trackMatches * 2;
+            // Bonus for artist match
+            const artistMatches = artistWords.filter(w => fn.includes(w)).length;
+            score += artistMatches * 1.5;
+            // Prefer smaller files (less likely to be partial .tmp renamed)
+            if (score > bestScore) {
+                bestScore = score;
+                bestMatch = f.filename;
+            }
+        }
+        return bestMatch;
+    } catch (e) {
+        return null;
+    }
 }
 
 // ===== Utilities =====

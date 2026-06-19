@@ -40,6 +40,7 @@ async def execute_download(req: DownloadRequest) -> None:
         return
 
     # Build command arguments (not shell-quoted — exec handles escaping)
+    # SpotiFLAC embeds metadata by default from Spotify track info
     cmd_args = [
         spotiflac_bin,
         str(req.url),
