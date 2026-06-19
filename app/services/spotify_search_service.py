@@ -1,5 +1,14 @@
-from spotapi import Song, Artist, Playlist
+from spotapi import Song, Artist
 from app.utils.logger import logger
+
+# Try to import Playlist class - spotapi API differs between versions
+try:
+    from spotapi import Playlist  # newer versions
+except ImportError:
+    try:
+        from spotapi.playlist import PublicPlaylist as Playlist  # older versions
+    except ImportError:
+        Playlist = None  # playlist search unavailable
 
 
 # ── Album tracks lookup ────────────────────────────────────────────
@@ -123,6 +132,9 @@ def _best_image(sources: list) -> str:
 
 def search_playlists_spotify(q: str, limit: int = 20) -> list[dict]:
     """Search for playlists using SpotAPI."""
+    if Playlist is None:
+        logger.warning(f"Playlist search unavailable - spotapi version doesn't support it")
+        return []
     logger.info(f"SpotAPI playlist search: q='{q}' limit={limit}")
     try:
         playlist = Playlist()
