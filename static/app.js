@@ -1154,7 +1154,7 @@ function openPlaylistView(playlist) {
     } else {
         listEl.innerHTML = playlist.tracks.map((t, i) => {
             const img = t.cover ? `<img class="track-cover" src="${escapeHtml(t.cover)}" alt="" onerror="this.remove()">` : '';
-            return `<div class="track-row" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.cover)}" data-url="${escapeHtml(t.url)}" data-trackid="${escapeHtml(t.trackId || '')}">`;
+            return `<div class="track-row" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.cover)}" data-url="${escapeHtml(t.url)}" data-trackid="${escapeHtml(t.trackId || '')}">
                 <span class="track-num">${i + 1}</span>
                 ${img}
                 <div class="track-info">
