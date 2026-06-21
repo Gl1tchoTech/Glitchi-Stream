@@ -1641,7 +1641,7 @@ async function streamAndPlay(trackName, artistName, coverUrl, trackId) {
     audio.addEventListener('error', () => {
         if (signal.aborted) return;
         devLog('Stream playback failed', { track: trackName });
-        showToast('Stream unavailable. Try downloading instead.', 'warning');
+        showToast('Stream unavailable for this track', 'warning');
         resetPlayer();
     });
 

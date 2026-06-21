@@ -1,14 +1,15 @@
-"""yt-dlp Audio Streamer — streams songs directly without downloading.
+"""yt-dlp Audio Streamer — streams songs directly, zero disk I/O.
 
-This module uses yt-dlp's extract_info (download=False) to resolve a YouTube
-audio URL from a search query, then proxies the audio chunks to the client
-via httpx streaming.  Zero bytes are written to disk.
+Uses two strategies:
 
-Key guarantees:
-• No files saved to disk — pure in-memory streaming
-• No API keys or client secrets required
-• Results cached for fast repeat playback (YouTube URLs expire after ~6h)
-• Runs yt-dlp extraction in a thread pool to keep the event loop free
+1. **Subprocess stdout piping** (primary) — runs ``yt-dlp -o -`` to remux
+   audio to stdout.  yt-dlp handles format selection and ensures the ``moov``
+   atom is at the start so the browser can play *immediately*.  Nothing is
+   written to disk.
+
+2. **URL proxy** (fallback) — extracts a signed YouTube URL via
+   ``extract_info(download=False)`` and proxies chunks via httpx.  Also zero
+   disk I/O, but can suffer from the moov-at-end problem with MP4 audio.
 """
 
 import asyncio
@@ -20,15 +21,69 @@ import yt_dlp
 
 from app.utils.logger import logger
 
-# ── Cache ────────────────────────────────────────────────────────────
-# YouTube signed URLs last ~6 hours; we evict at 5 hours.
+# ── Cache (for URL strategy) ─────────────────────────────────────────
 _stream_cache: dict[str, dict] = {}
 _CACHE_TTL = 5 * 3600
 _MAX_CACHE_SIZE = 200
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# Primary strategy — yt-dlp subprocess → stdout → browser
+# ═══════════════════════════════════════════════════════════════════════
+
+async def stream_audio_chunks(query: str) -> AsyncGenerator[bytes, None]:
+    """Run yt-dlp as a subprocess, remux audio to stdout, and yield chunks.
+
+    yt-dlp handles format selection AND moves the moov atom to the start
+    so the browser can begin playback before the entire file arrives.
+    **Zero bytes are written to disk.**
+    """
+    cmd = [
+        "yt-dlp",
+        "--format", "bestaudio/best",
+        "--no-playlist",
+        "--quiet",
+        "--no-warnings",
+        "--output", "-",           # stdout — no file on disk
+        "--no-download-archive",
+        "--no-cache-dir",
+        f"ytsearch:{query}",
+    ]
+
+    logger.info(f"yt-dlp stream (subprocess): '{query}'")
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        # Stream stdout in 64 KiB chunks
+        while True:
+            chunk = await proc.stdout.read(65536)
+            if not chunk:
+                break
+            yield chunk
+
+        # Wait for process to finish (non-blocking since stdout is done)
+        await proc.wait()
+
+        if proc.returncode != 0 and proc.returncode is not None:
+            stderr = (await proc.stderr.read()).decode(errors="replace")[:200]
+            logger.error(f"yt-dlp subprocess failed ({proc.returncode}): {stderr}")
+
+    except FileNotFoundError:
+        logger.error("yt-dlp binary not found. Install with: pip install yt-dlp")
+    except Exception as e:
+        logger.error(f"yt-dlp subprocess stream error: {type(e).__name__}: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Fallback — URL extraction + httpx proxy
+# ═══════════════════════════════════════════════════════════════════════
+
 def _get_ydl_opts() -> dict:
-    """Return yt-dlp options optimised for audio-only extraction."""
     return {
         "format": "bestaudio/best",
         "noplaylist": True,
@@ -37,29 +92,16 @@ def _get_ydl_opts() -> dict:
     }
 
 
-# ── Resolve ──────────────────────────────────────────────────────────
-
 async def resolve_stream(query: str) -> Optional[dict]:
-    """Search YouTube for *query* and return audio-stream metadata.
+    """Search YouTube for *query*, return stream metadata (URL, title, …).
 
-    Returns a dict with:
-        • ``url``         – direct audio stream URL (signed, short-lived)
-        • ``title``        – YouTube video title
-        • ``duration``     – duration in seconds
-        • ``thumbnail``    – thumbnail image URL
-        • ``webpage_url``  – YouTube watch page
-
-    The returned URL is **not** suitable for direct client use because
-    YouTube signs it for a single IP.  Call :func:`stream_audio_chunks`
-    to proxy the audio through the server.
+    Uses ``extract_info(download=False)`` — no files written to disk.
     """
     cache_key = query.lower().strip()
 
-    # ── cache hit ────────────────────────────────────────────────
     if cache_key in _stream_cache:
         entry = _stream_cache[cache_key]
-        age = time.time() - entry.get("_cached_at", 0)
-        if age < _CACHE_TTL:
+        if time.time() - entry.get("_cached_at", 0) < _CACHE_TTL:
             logger.info(f"Using cached stream for: {query}")
             return {k: v for k, v in entry.items() if not k.startswith("_")}
 
@@ -79,21 +121,19 @@ async def resolve_stream(query: str) -> Optional[dict]:
 
         entry = info["entries"][0]
         result = {
-            "url":          entry.get("url", ""),
-            "title":        entry.get("title", ""),
-            "duration":     entry.get("duration", 0),
-            "thumbnail":    entry.get("thumbnail", ""),
-            "webpage_url":  entry.get("webpage_url", ""),
+            "url":         entry.get("url", ""),
+            "title":       entry.get("title", ""),
+            "duration":    entry.get("duration", 0),
+            "thumbnail":   entry.get("thumbnail", ""),
+            "webpage_url": entry.get("webpage_url", ""),
         }
 
         if not result["url"]:
             logger.warning(f"No audio URL found for: {query}")
             return None
 
-        # ── cache ───────────────────────────────────────────────
         result["_cached_at"] = time.time()
         if len(_stream_cache) >= _MAX_CACHE_SIZE:
-            # evict oldest 25 %
             sorted_keys = sorted(
                 _stream_cache, key=lambda k: _stream_cache[k].get("_cached_at", 0),
             )
@@ -101,9 +141,7 @@ async def resolve_stream(query: str) -> Optional[dict]:
                 del _stream_cache[old_key]
         _stream_cache[cache_key] = result
 
-        logger.info(
-            f"yt-dlp resolved: '{result['title']}' ({result['duration']}s)"
-        )
+        logger.info(f"yt-dlp resolved: '{result['title']}' ({result['duration']}s)")
         return {k: v for k, v in result.items() if not k.startswith("_")}
 
     except Exception as e:
@@ -111,21 +149,13 @@ async def resolve_stream(query: str) -> Optional[dict]:
         return None
 
 
-# ── Stream proxy ─────────────────────────────────────────────────────
-
-async def stream_audio_chunks(audio_url: str, query: str) -> AsyncGenerator[bytes, None]:
-    """Proxy a YouTube audio URL to the client as an async byte generator.
-
-    Yields 64 KiB chunks.  Handles redirects gracefully and logs errors.
-    Call from a FastAPI ``StreamingResponse``.
-    """
+async def proxy_audio_chunks(audio_url: str, query: str) -> AsyncGenerator[bytes, None]:
+    """Proxy a YouTube audio URL via httpx (64 KiB chunks, zero disk)."""
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
             async with client.stream("GET", audio_url, follow_redirects=True) as resp:
                 if resp.status_code >= 400:
-                    logger.error(
-                        f"YouTube stream error: HTTP {resp.status_code} for {query}"
-                    )
+                    logger.error(f"YouTube stream HTTP {resp.status_code} for {query}")
                     return
                 async for chunk in resp.aiter_bytes(chunk_size=65536):
                     yield chunk
@@ -135,10 +165,9 @@ async def stream_audio_chunks(audio_url: str, query: str) -> AsyncGenerator[byte
         logger.error(f"Stream proxy error for '{query}': {type(e).__name__}: {e}")
 
 
-# ── Content-type helper ──────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────
 
 def guess_content_type(audio_url: str) -> str:
-    """Return a MIME type based on the URL extension."""
     lower = audio_url.lower()
     if ".mp3" in lower:
         return "audio/mpeg"
@@ -149,9 +178,6 @@ def guess_content_type(audio_url: str) -> str:
     return "audio/mp4"
 
 
-# ── Cache management ─────────────────────────────────────────────────
-
 def clear_cache() -> None:
-    """Clear the streaming URL cache."""
     _stream_cache.clear()
     logger.info("yt-dlp stream cache cleared")
