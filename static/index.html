@@ -234,43 +234,7 @@
             </section>
         </main>
 
-        <!-- Pill Player Bar -->
-        <footer class="player-bar">
-            <div class="player-left">
-                <div class="player-cover" id="player-cover"></div>
-                <div class="player-info">
-                    <span class="player-track" id="player-track">No track selected</span>
-                    <span class="player-artist" id="player-artist">&nbsp;</span>
-                </div>
-            </div>
-            <div class="player-center">
-                <div class="player-controls">
-                    <button class="ctrl-btn ctrl-shuffle" id="btn-shuffle" title="Shuffle">
-                        <svg viewBox="0 0 24 24" fill="none"><path d="M18 4l3 3-3 3M18 20l3-3-3-3M3 7h8a4 4 0 014 4v0M3 17h8a4 4 0 004-4v0" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                    </button>
-                    <button class="ctrl-btn" id="btn-prev" disabled>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h4v12H6V6zm8 0h4v12h-4V6z"/></svg>
-                    </button>
-                    <button class="ctrl-btn ctrl-play" id="btn-play" disabled>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    </button>
-                    <button class="ctrl-btn" id="btn-next" disabled>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
-                    </button>
-                    <button class="ctrl-btn ctrl-loop" id="btn-loop" title="Loop">
-                        <svg viewBox="0 0 24 24" fill="none"><path d="M17 2l3 3-3 3M7 22l-3-3 3-3M21 5H10a7 7 0 00-7 7M3 19h11a7 7 0 007-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                    </button>
-                </div>
-                <div class="progress-bar">
-                    <span class="time" id="time-current">0:00</span>
-                    <div class="progress-track" id="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
-                    <span class="time" id="time-total">0:00</span>
-                </div>
-            </div>
-            <div class="player-right">
-                <span class="powered-by">Powered by SpotAPI + SpotiFLAC</span>
-            </div>
-        </footer>
+        <!-- Player bar hidden: download-only mode -->
     </div>
 
     <!-- Detail View Modal -->
@@ -287,11 +251,7 @@
                     <div class="detail-actions">
                         <button class="btn-primary" id="btn-detail-download">
                             <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                            Download MP3
-                        </button>
-                        <button class="btn-secondary" id="btn-detail-play">
-                            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                            Play
+                            Download
                         </button>
                         <button class="btn-secondary" id="btn-detail-add-playlist">
                             <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
