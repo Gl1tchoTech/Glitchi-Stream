@@ -214,6 +214,22 @@
                         Download
                     </button>
                     <div id="download-status" class="status-msg hidden"></div>
+                    <!-- Download Progress Bar -->
+                    <div id="download-progress" class="download-progress hidden">
+                        <div class="progress-header">
+                            <span class="progress-stage" id="progress-stage">Preparing...</span>
+                            <span class="progress-pct" id="progress-pct">0%</span>
+                        </div>
+                        <div class="progress-track-dl">
+                            <div class="progress-fill-dl" id="progress-fill-dl"></div>
+                        </div>
+                        <div class="progress-steps">
+                            <span class="progress-step" data-step="pending">Queued</span>
+                            <span class="progress-step" data-step="downloading">Downloading</span>
+                            <span class="progress-step" data-step="processing">Processing</span>
+                            <span class="progress-step" data-step="complete">Ready</span>
+                        </div>
+                    </div>
                 </div>
             </section>
         </main>
@@ -285,6 +301,21 @@
                             <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/><path d="M16.5 8.5c-2.5-1.5-6.5-1.5-9 0l.5 1c2-1 5.5-1 7.5 0l1-1zM15 11c-2-1-5-1-7 0l.5 1c1.5-.8 4-.8 5.5 0l1-1zM13.5 13.5c-1.5-.8-3.5-.8-5 0l.5 1c1-.5 3-.5 4 0l.5-1z" fill="var(--bg-primary)"/></svg>
                             Open in Spotify
                         </button>
+                    </div>
+                    <div id="detail-download-progress" class="download-progress hidden" style="margin-top:16px">
+                        <div class="progress-header">
+                            <span class="progress-stage" id="detail-progress-stage">Preparing...</span>
+                            <span class="progress-pct" id="detail-progress-pct">0%</span>
+                        </div>
+                        <div class="progress-track-dl">
+                            <div class="progress-fill-dl" id="detail-progress-fill-dl"></div>
+                        </div>
+                        <div class="progress-steps">
+                            <span class="progress-step" data-step="pending">Queued</span>
+                            <span class="progress-step" data-step="downloading">Downloading</span>
+                            <span class="progress-step" data-step="processing">Processing</span>
+                            <span class="progress-step" data-step="complete">Ready</span>
+                        </div>
                     </div>
                 </div>
             </div>

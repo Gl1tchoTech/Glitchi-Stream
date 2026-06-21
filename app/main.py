@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 from app.config import settings
 from app.api import download, file, health, search, docs, playlists, stream
 from app.services.cleanup_service import start_cleanup_task
+from app.services.download_task_manager import task_manager
 
 app = FastAPI(title=settings.PROJECT_NAME)
 
@@ -28,3 +29,4 @@ async def root():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(start_cleanup_task())
+    asyncio.create_task(task_manager.start_cleanup_loop())

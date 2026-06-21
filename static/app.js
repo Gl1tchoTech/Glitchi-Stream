@@ -101,6 +101,7 @@ document.addEventListener('DOMContentLoaded', () => {
     openTab(state.activeTab);
     loadFiles();
     renderPlaylists();
+    resumeActiveDownloads();
     if (state.devMode) unlockDevUI();
     devLog('App initialized', { theme: state.theme, devMode: state.devMode });
 });
@@ -360,6 +361,9 @@ function openDetailView(item) {
     state.detailItem = item;
     devLog('Opening detail view', { type: item.type, name: item.name, id: item.id });
 
+    // Reset any active download progress bar from previous detail view
+    document.getElementById('detail-download-progress').classList.add('hidden');
+
     document.getElementById('detail-type').textContent = item.type?.toUpperCase() || '';
     document.getElementById('detail-title').textContent = item.name || '';
     document.getElementById('detail-subtitle').textContent = item.artists || '';
@@ -476,40 +480,8 @@ async function fetchAlbumTracks(albumId, coverUrl) {
 }
 
 async function downloadFromDetail(url) {
-    showToast('Downloading...', 'info');
-    devLog('Direct download from detail', { url });
-    try {
-        const res = await fetch('/download/now', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, quality: state.defaultQuality }),
-        });
-        if (!res.ok) {
-            const err = await res.json().catch(() => ({ detail: 'Download failed' }));
-            showToast(err.detail || 'Download failed', 'error');
-            return;
-        }
-        // Get the blob and trigger browser download
-        const blob = await res.blob();
-        const disposition = res.headers.get('Content-Disposition') || '';
-        let filename = 'download.mp3';
-        const fnameMatch = disposition.match(/filename="?([^";\n]+)"?/);
-        if (fnameMatch) filename = fnameMatch[1];
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(a.href);
-        showToast('Download complete!', 'success');
-        devLog('Direct download complete', { filename });
-        // Refresh files list
-        setTimeout(() => loadFiles(), 1000);
-    } catch (e) {
-        showToast('Download failed', 'error');
-        devLog('Direct download error', { error: e.message });
-    }
+    devLog('Starting task-based download from detail', { url });
+    startDownloadWithProgress(url, 'detail');
 }
 
 // ===== Modals =====
@@ -1062,45 +1034,234 @@ function setupDownload() {
 async function triggerDownload() {
     const urlInput = document.getElementById('download-url');
     const qualityEl = document.getElementById('download-quality');
-    const btn = document.getElementById('btn-download');
-    const status = document.getElementById('download-status');
     const url = urlInput.value.trim();
 
     if (!url) { showToast('Please enter a Spotify URL', 'error'); return; }
     if (!url.includes('spotify.com')) { showToast('Please enter a valid Spotify URL', 'error'); return; }
 
-    btn.disabled = true;
-    btn.innerHTML = '<div class="spinner" style="width:18px;height:18px;border-width:2px;margin:0"></div> Downloading...';
-    status.className = 'status-msg hidden';
+    devLog('Starting task-based download from tab', { url, quality: qualityEl.value });
+    startDownloadWithProgress(url, 'tab');
+}
 
-    devLog('Starting download', { url, quality: qualityEl.value });
+// ===== Download Progress Bar System =====
+
+// Maps status to progress percentage (approximate, for the bar fill)
+const PROGRESS_PCT_MAP = {
+    pending: 5,
+    downloading: 30,
+    processing: 75,
+    complete: 100,
+    failed: 100,
+};
+
+let _activePollTimers = {}; // taskId → interval timer
+
+async function startDownloadWithProgress(url, source) {
+    // Hide previous status, show progress bar
+    const isDetail = source === 'detail';
+    const progressEl = document.getElementById(isDetail ? 'detail-download-progress' : 'download-progress');
+    const stageEl = document.getElementById(isDetail ? 'detail-progress-stage' : 'progress-stage');
+    const pctEl = document.getElementById(isDetail ? 'detail-progress-pct' : 'progress-pct');
+    const fillEl = document.getElementById(isDetail ? 'detail-progress-fill-dl' : 'progress-fill-dl');
+
+    // Hide status msg if on tab
+    if (!isDetail) {
+        document.getElementById('download-status').classList.add('hidden');
+    }
+
+    // Reset and show progress bar
+    fillEl.className = 'progress-fill-dl';
+    fillEl.style.width = '0%';
+    pctEl.textContent = '0%';
+    stageEl.textContent = 'Starting...';
+    progressEl.querySelectorAll('.progress-step').forEach(s => s.className = 'progress-step');
+    progressEl.classList.remove('hidden');
+
+    // Disable download button
+    const btn = document.getElementById(isDetail ? 'btn-detail-download' : 'btn-download');
+    if (btn) {
+        btn.disabled = true;
+        btn.style.opacity = '0.6';
+    }
+
+    showToast('Download queued...', 'info');
 
     try {
-        const res = await fetch('/download/', {
+        const res = await fetch('/download/task', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, quality: qualityEl.value }),
+            body: JSON.stringify({ url, quality: state.defaultQuality }),
         });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Failed to start download' }));
+            showToast(err.detail || 'Failed to start download', 'error');
+            progressEl.classList.add('hidden');
+            if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+            return;
+        }
         const data = await res.json();
-        if (res.ok) {
-            status.className = 'status-msg success';
-            status.textContent = data.message || 'Download queued! Check Your Files.';
-            urlInput.value = '';
-            showToast('Download started!', 'success');
-            addDownloadedFile(url);
-        } else {
-            status.className = 'status-msg error';
-            status.textContent = data.detail || 'Download failed';
-            showToast(data.detail || 'Download failed', 'error');
+        const taskId = data.task_id;
+        devLog('Download task created', { taskId, source });
+
+        // Store in localStorage for refresh resilience
+        localStorage.setItem('glitchi-active-download', JSON.stringify({
+            taskId,
+            url,
+            source,
+            startedAt: Date.now(),
+        }));
+
+        // Start polling
+        pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn);
+    } catch (e) {
+        showToast('Download failed to start', 'error');
+        devLog('Download task start error', { error: e.message });
+        progressEl.classList.add('hidden');
+        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+    }
+}
+
+function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn) {
+    // Clear any previous timer for this task
+    if (_activePollTimers[taskId]) {
+        clearInterval(_activePollTimers[taskId]);
+    }
+
+    const poll = async () => {
+        try {
+            const res = await fetch(`/download/progress/${taskId}`);
+            if (!res.ok) {
+                // Task not found, stop polling
+                clearInterval(_activePollTimers[taskId]);
+                delete _activePollTimers[taskId];
+                return;
+            }
+            const task = await res.json();
+            updateProgressBar(task, progressEl, fillEl, pctEl, stageEl);
+
+            if (task.status === 'complete') {
+                // Stop polling
+                clearInterval(_activePollTimers[taskId]);
+                delete _activePollTimers[taskId];
+                localStorage.removeItem('glitchi-active-download');
+
+                // Enable button
+                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+
+                // Trigger file download
+                if (task.filename) {
+                    devLog('Download complete, sending payload', { filename: task.filename });
+                    showToast('Download complete! Sending file...', 'success');
+                    // Download the file
+                    setTimeout(() => {
+                        const a = document.createElement('a');
+                        a.href = `/files/download/${encodeURIComponent(task.filename)}`;
+                        a.download = task.filename.split('/').pop() || 'download.mp3';
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                    }, 500);
+
+                    // Hide progress after a moment
+                    setTimeout(() => {
+                        progressEl.classList.add('hidden');
+                        if (source === 'tab') {
+                            document.getElementById('download-url').value = '';
+                        }
+                        loadFiles(); // Refresh files list
+                    }, 2000);
+                }
+            } else if (task.status === 'failed') {
+                // Stop polling
+                clearInterval(_activePollTimers[taskId]);
+                delete _activePollTimers[taskId];
+                localStorage.removeItem('glitchi-active-download');
+
+                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+                showToast(task.error || 'Download failed', 'error');
+                devLog('Download failed', { taskId, error: task.error });
+
+                // Keep progress visible showing failure for a few seconds
+                setTimeout(() => {
+                    progressEl.classList.add('hidden');
+                }, 4000);
+            }
+        } catch (e) {
+            devLog('Progress poll error', { taskId, error: e.message });
+        }
+    };
+
+    // Poll immediately, then every second
+    poll();
+    _activePollTimers[taskId] = setInterval(poll, 1000);
+}
+
+function updateProgressBar(task, progressEl, fillEl, pctEl, stageEl) {
+    const pct = PROGRESS_PCT_MAP[task.status] || 0;
+    fillEl.style.width = `${pct}%`;
+    pctEl.textContent = `${pct}%`;
+    stageEl.textContent = task.stage || task.status;
+
+    // Update fill class based on status
+    fillEl.className = 'progress-fill-dl';
+    if (task.status === 'complete') {
+        fillEl.classList.add('complete');
+    } else if (task.status === 'failed') {
+        fillEl.classList.add('failed');
+    } else if (task.status === 'downloading') {
+        fillEl.classList.add('indeterminate');
+    }
+
+    // Update step indicators
+    const steps = progressEl.querySelectorAll('.progress-step');
+    const statusOrder = ['pending', 'downloading', 'processing', 'complete'];
+    const currentIdx = statusOrder.indexOf(task.status);
+
+    // Handle failed state explicitly (all steps show failure)
+    if (task.status === 'failed') {
+        steps.forEach(s => { s.className = 'progress-step failed'; });
+        return;
+    }
+
+    steps.forEach((step, i) => {
+        step.className = 'progress-step';
+        if (i < currentIdx) {
+            step.classList.add('done');
+        } else if (i === currentIdx) {
+            step.classList.add('active');
+        }
+    });
+}
+
+// Resume active downloads on page load (survives refresh)
+function resumeActiveDownloads() {
+    const active = localStorage.getItem('glitchi-active-download');
+    if (!active) return;
+
+    try {
+        const info = JSON.parse(active);
+        const age = Date.now() - info.startedAt;
+        // Only resume if less than 10 minutes old
+        if (age > 600000) {
+            localStorage.removeItem('glitchi-active-download');
+            return;
+        }
+
+        const isDetail = info.source === 'detail';
+        const progressEl = document.getElementById(isDetail ? 'detail-download-progress' : 'download-progress');
+        const stageEl = document.getElementById(isDetail ? 'detail-progress-stage' : 'progress-stage');
+        const pctEl = document.getElementById(isDetail ? 'detail-progress-pct' : 'progress-pct');
+        const fillEl = document.getElementById(isDetail ? 'detail-progress-fill-dl' : 'progress-fill-dl');
+        const btn = document.getElementById(isDetail ? 'btn-detail-download' : 'btn-download');
+
+        if (progressEl) {
+            progressEl.classList.remove('hidden');
+            devLog('Resumed download progress', { taskId: info.taskId, source: info.source });
+            pollDownloadProgress(info.taskId, progressEl, stageEl, pctEl, fillEl, info.source, btn);
         }
     } catch (e) {
-        status.className = 'status-msg error';
-        status.textContent = 'Network error';
-        devLog('Download error', { error: e.message });
+        localStorage.removeItem('glitchi-active-download');
     }
-    status.classList.remove('hidden');
-    btn.disabled = false;
-    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> Download`;
 }
 
 // ===== Playlists =====
