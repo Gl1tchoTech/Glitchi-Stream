@@ -330,7 +330,7 @@ function setupResultCardDelegation() {
             const trackId = card.dataset.id;
             if (track) {
                 updatePlayerUI(track, artist, cover);
-                downloadAndPlay(url, track, artist, cover, trackId);
+                playTrack(url, track, artist, cover, trackId);
             }
             return;
         }
@@ -423,7 +423,7 @@ function openDetailView(item) {
     btnPlay.onclick = () => {
         if (item.url) {
             updatePlayerUI(item.name, item.artists, item.cover);
-            downloadAndPlay(item.url, item.name, item.artists, item.cover, item.id);
+            playTrack(item.url, item.name, item.artists, item.cover, item.id);
         }
     };
     btnAddPlaylist.onclick = () => openPlaylistPicker(item);
@@ -466,7 +466,7 @@ async function fetchAlbumTracks(albumId, coverUrl) {
                     }
                     updatePlayerUI(row.dataset.name, row.dataset.artist, row.dataset.cover);
                     if (row.dataset.url) {
-                        downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover, row.dataset.trackid || '');
+                        playTrack(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover, row.dataset.trackid || '');
                     }
                 });
             });
@@ -744,10 +744,11 @@ function playFile(filename, seekTime = 0, displayName = null, displayArtist = nu
 }
 
 function updateTimeDisplay(audio) {
-    const pct = (audio.currentTime / audio.duration) * 100 || 0;
+    const dur = audio.duration;
+    const pct = (dur && isFinite(dur) && dur > 0) ? (audio.currentTime / dur) * 100 : 0;
     document.getElementById('progress-fill').style.width = `${pct}%`;
     document.getElementById('time-current').textContent = formatTime(audio.currentTime);
-    document.getElementById('time-total').textContent = formatTime(audio.duration || 0);
+    document.getElementById('time-total').textContent = formatTime(dur || 0);
 }
 
 function downloadFile(filename) {
@@ -779,7 +780,7 @@ function resetPlayer() {
 }
 
 function formatTime(seconds) {
-    if (!seconds || isNaN(seconds)) return '0:00';
+    if (!seconds || !isFinite(seconds)) return '0:00';
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
     return `${m}:${s.toString().padStart(2, '0')}`;
@@ -869,9 +870,11 @@ function setupPlayerControls() {
 
     document.getElementById('progress-track').addEventListener('click', (e) => {
         if (!state.currentAudio) return;
+        const dur = state.currentAudio.duration;
+        if (!isFinite(dur) || dur <= 0) return;
         const rect = e.currentTarget.getBoundingClientRect();
         const pct = (e.clientX - rect.left) / rect.width;
-        state.currentAudio.currentTime = pct * state.currentAudio.duration;
+        state.currentAudio.currentTime = pct * dur;
     });
 
     // Shuffle
@@ -1150,17 +1153,32 @@ function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source
 
                 // Trigger file download
                 if (task.filename) {
+                    const displayName = task.filename.split('/').pop() || 'download.mp3';
                     devLog('Download complete, sending payload', { filename: task.filename });
-                    showToast('Download complete! Sending file...', 'success');
-                    // Download the file
-                    setTimeout(() => {
-                        const a = document.createElement('a');
-                        a.href = `/files/download/${encodeURIComponent(task.filename)}`;
-                        a.download = task.filename.split('/').pop() || 'download.mp3';
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                    }, 500);
+                    showToast(`Downloaded: ${displayName}`, 'success');
+                    // Fetch the file as blob and trigger browser download (reliable, not blocked by popup blockers)
+                    setTimeout(async () => {
+                        try {
+                            const fileRes = await fetch(`/files/download/${encodeURIComponent(task.filename)}`);
+                            if (!fileRes.ok) {
+                                showToast('Failed to fetch downloaded file', 'error');
+                                return;
+                            }
+                            const blob = await fileRes.blob();
+                            const blobUrl = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = blobUrl;
+                            a.download = task.filename.split('/').pop() || 'download.mp3';
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(blobUrl);
+                            devLog('Download payload sent to browser', { filename: displayName });
+                        } catch (e) {
+                            showToast('Download payload failed', 'error');
+                            devLog('Download payload error', { error: e.message });
+                        }
+                    }, 300);
 
                     // Hide progress after a moment
                     setTimeout(() => {
@@ -1413,7 +1431,7 @@ function openPlaylistView(playlist) {
                 if (e.target.closest('.track-remove') || e.target.closest('.track-dl')) return;
                 updatePlayerUI(row.dataset.name, row.dataset.artist, row.dataset.cover);
                 if (row.dataset.url) {
-                    downloadAndPlay(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover, row.dataset.trackid || '');
+                    playTrack(row.dataset.url, row.dataset.name, row.dataset.artist, row.dataset.cover, row.dataset.trackid || '');
                 }
             });
         });
@@ -1555,48 +1573,55 @@ async function streamAndPlay(trackName, artistName, coverUrl, trackId) {
     _streamAbortController = new AbortController();
     const signal = _streamAbortController.signal;
 
-    // 1. Try existing downloaded file first (fastest path)
-    const existingFile = await findMatchingFile(trackName, artistName);
-    if (existingFile) {
-        devLog('Found existing file for play', { filename: existingFile, track: trackName });
-        _streamAbortController = null;
-        playFile(existingFile, 0, trackName, artistName);
-        return;
-    }
-
-    // 2. Update player UI with streaming state
+    // Always stream via yt-dlp — no local file fallback
     updatePlayerUI(trackName, artistName, coverUrl);
     document.getElementById('player-track').textContent = trackName;
-    document.getElementById('player-artist').textContent = artistName || 'Streaming...';
+    document.getElementById('player-artist').textContent = artistName || 'Loading...';
     document.getElementById('btn-play').disabled = true;
+    document.getElementById('btn-prev').disabled = true;
+    document.getElementById('btn-next').disabled = true;
 
-    // 3. Build stream query
+    // Build stream query
     const streamQuery = `${trackName} ${artistName || ''}`.trim();
     const streamUrl = `/stream/audio?q=${encodeURIComponent(streamQuery)}`;
 
     devLog('Starting YouTube stream', { query: streamQuery, track: trackName });
 
-    // 4. Stop any current audio
+    // Stop any current audio
     if (state.currentAudio) {
         state.currentAudio.pause();
         state.currentAudio.remove();
         state.currentAudio = null;
     }
 
-    // 5. Create audio element pointing to our stream endpoint
+    // Create audio element pointing to our stream endpoint
     const audio = new Audio(streamUrl);
 
-    audio.addEventListener('loadedmetadata', () => {
+    function enableControls() {
         if (signal.aborted) return;
-        state.currentFilename = null; // not a local file
+        state.currentFilename = null;
         state.isPlaying = true;
         updatePlayButton();
         document.getElementById('btn-play').disabled = false;
         document.getElementById('btn-prev').disabled = false;
         document.getElementById('btn-next').disabled = false;
         updateTimeDisplay(audio);
-        showToast(`Playing: ${trackName}`, 'info');
-        devLog('Stream started playing', { track: trackName });
+    }
+
+    // loadedmetadata gives duration (for non-live streams)
+    audio.addEventListener('loadedmetadata', () => {
+        if (signal.aborted) return;
+        if (!state.isPlaying) {
+            enableControls();
+            showToast(`Streaming: ${trackName}`, 'info');
+            devLog('Stream metadata loaded', { track: trackName, duration: audio.duration });
+        }
+    });
+
+    // canplay fires when enough data is buffered — enable controls if not already
+    audio.addEventListener('canplay', () => {
+        if (signal.aborted) return;
+        if (!state.isPlaying) enableControls();
     });
 
     audio.addEventListener('timeupdate', () => {
@@ -1615,18 +1640,18 @@ async function streamAndPlay(trackName, artistName, coverUrl, trackId) {
 
     audio.addEventListener('error', () => {
         if (signal.aborted) return;
-        devLog('Stream playback failed, falling back to download', { track: trackName });
-        // Fallback: try to download and play from local files
-        fallbackDownloadAndPlay(trackName, artistName, coverUrl, trackId);
+        devLog('Stream playback failed', { track: trackName });
+        showToast('Stream unavailable. Try downloading instead.', 'warning');
+        resetPlayer();
     });
 
     audio.addEventListener('playing', () => {
         if (signal.aborted) return;
+        enableControls();
         updatePlayerUI(trackName, artistName, coverUrl);
     });
 
     state.currentAudio = audio;
-    state.streamQuery = streamQuery; // track what's streaming
     audio.play().catch((err) => {
         if (signal.aborted) return;
         devLog('Stream play() failed', { error: err.message });
@@ -1634,7 +1659,7 @@ async function streamAndPlay(trackName, artistName, coverUrl, trackId) {
         document.getElementById('btn-play').disabled = false;
     });
 
-    // Add to stream queue for shuffle/next (structured format)
+    // Add to stream queue for shuffle/next
     const queueEntry = `stream:${trackName}||${artistName || ''}||${coverUrl || ''}`;
     if (!state.queueOrder.includes(queueEntry)) {
         state.queueOrder.push(queueEntry);
@@ -1642,61 +1667,9 @@ async function streamAndPlay(trackName, artistName, coverUrl, trackId) {
     state.queueIndex = state.queueOrder.indexOf(queueEntry);
 }
 
-async function fallbackDownloadAndPlay(trackName, artistName, coverUrl, trackId) {
-    showToast(`Stream unavailable. Trying download...`, 'info');
-    devLog('Fallback: starting download for playback', { track: trackName });
-
-    // Use the download tab endpoint. We don't have a valid Spotify URL for
-    // streaming fallback, so show a message instead of sending a bad URL.
-    showToast('Stream not available. Try downloading from the Download tab.', 'warning');
-    devLog('Fallback: no valid Spotify URL available for download', { track: trackName });
-    resetPlayer();
-    return;
-}
-
-// Backward compat: downloadAndPlay delegates to streamAndPlay
-// Keep renamed to avoid breaking existing internal references
-async function downloadAndPlay(url, trackName, artistName, coverUrl, trackId) {
-    // For search results and detail views, use streaming
+// Wrapper: playTrack streams via yt-dlp (renamed from downloadAndPlay for clarity)
+async function playTrack(url, trackName, artistName, coverUrl, trackId) {
     await streamAndPlay(trackName, artistName, coverUrl, trackId);
-}
-
-async function findMatchingFile(trackName, artistName) {
-    try {
-        const res = await fetch('/files/');
-        if (!res.ok) return null;
-        const data = await res.json();
-        const files = data.files || [];
-
-        // Build search words from track name and artist
-        const trackWords = trackName.toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
-        const artistWords = (artistName || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
-
-        // Score each file: track word matches + artist word matches
-        let bestMatch = null;
-        let bestScore = 0;
-
-        for (const f of files) {
-            const fn = f.filename.toLowerCase();
-            let score = 0;
-            // Must match at least half of track words
-            const trackMatches = trackWords.filter(w => fn.includes(w)).length;
-            const trackRatio = trackWords.length > 0 ? trackMatches / trackWords.length : 0;
-            if (trackRatio < 0.5) continue;
-            score += trackMatches * 2;
-            // Bonus for artist match
-            const artistMatches = artistWords.filter(w => fn.includes(w)).length;
-            score += artistMatches * 1.5;
-            // Prefer smaller files (less likely to be partial .tmp renamed)
-            if (score > bestScore) {
-                bestScore = score;
-                bestMatch = f.filename;
-            }
-        }
-        return bestMatch;
-    } catch (e) {
-        return null;
-    }
 }
 
 // ===== Utilities =====
