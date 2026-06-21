@@ -7,3 +7,5 @@ spotapi
 pymongo
 redis
 aiofiles
+httpx
+yt-dlp

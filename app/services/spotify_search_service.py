@@ -183,10 +183,14 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     # Track & Album search via Song.query_songs (returns both tracksV2 + albumsV2)
     if "track" in types_requested or "album" in types_requested:
         song = Song()
-        song_data = song.query_songs(q, limit=limit)
+        try:
+            song_data = song.query_songs(q, limit=limit)
+        except Exception as e:
+            logger.error(f"SpotAPI query_songs exception for q='{q}': {type(e).__name__}: {e}")
+            song_data = None
         if not song_data or not isinstance(song_data, dict):
             logger.error(f"SpotAPI query_songs returned invalid data for q='{q}'")
-            return raw
+            song_data = {}
         search_v2 = song_data.get("data", {}).get("searchV2", {})
 
         if "track" in types_requested:
@@ -247,10 +251,14 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     # Artist search via Artist.query_artists
     if "artist" in types_requested:
         artist = Artist()
-        artist_data = artist.query_artists(q, limit=limit)
+        try:
+            artist_data = artist.query_artists(q, limit=limit)
+        except Exception as e:
+            logger.error(f"SpotAPI query_artists exception for q='{q}': {type(e).__name__}: {e}")
+            artist_data = None
         if not artist_data or not isinstance(artist_data, dict):
             logger.error(f"SpotAPI query_artists returned invalid data for q='{q}'")
-            return raw
+            artist_data = {}
         search_v2 = artist_data.get("data", {}).get("searchV2", {})
         artist_items_raw = search_v2.get("artists", {}).get("items", [])
 

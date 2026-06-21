@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.config import settings
-from app.api import download, file, health, search, docs, playlists
+from app.api import download, file, health, search, docs, playlists, stream
 from app.services.cleanup_service import start_cleanup_task
 
 app = FastAPI(title=settings.PROJECT_NAME)
@@ -14,6 +14,7 @@ app.include_router(file.router)
 app.include_router(search.router)
 app.include_router(docs.router)
 app.include_router(playlists.router)
+app.include_router(stream.router)
 
 # Serve static files (CSS, JS, images)
 app.mount("/static", StaticFiles(directory="static"), name="static")
