@@ -10,10 +10,13 @@ const state = {
     debugMode: localStorage.getItem('glitchi-debug') === 'true',
     showApiLog: localStorage.getItem('glitchi-api-log') === 'true',
     defaultQuality: localStorage.getItem('glitchi-quality') || 'LOSSLESS',
+    defaultDownloader: localStorage.getItem('glitchi-downloader') || 'spotiflac',
     playlists: JSON.parse(localStorage.getItem('glitchi-playlists') || '[]'),
     downloadedFiles: JSON.parse(localStorage.getItem('glitchi-downloaded-files') || '[]'),
     searchHistory: JSON.parse(localStorage.getItem('glitchi-search-history') || '[]'),
-    detailItem: null, // current item in detail view
+    detailItem: null,
+    currentAudio: null,       // HTMLAudioElement for player bar
+    playerTrack: null,        // {name, artist, cover, url} currently playing/streaming
 };
 
 // ===== Logger (dev mode) =====
@@ -77,6 +80,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyTheme(state.theme);
     document.getElementById('settings-theme').value = state.theme;
     document.getElementById('settings-quality').value = state.defaultQuality;
+    document.getElementById('settings-downloader').value = state.defaultDownloader;
     setupNavigation();
     setupSearch();
     setupFiles();
@@ -89,6 +93,8 @@ document.addEventListener('DOMContentLoaded', () => {
     setupSettings();
     setupPlaylists();
     setupSearchHistory();
+    setupPlayerBar();
+    fetchAvailableDownloaders();
     openTab(state.activeTab);
     loadFiles();
     renderPlaylists();
@@ -312,6 +318,16 @@ function setupResultCardDelegation() {
         const card = e.target.closest('.card, .artist-item');
         if (!card) return;
 
+        // If card-stream (stream) button was clicked on a track card
+        if (e.target.closest('.card-stream')) {
+            const name = card.dataset.title || card.querySelector('.card-title')?.textContent || '';
+            const artists = card.dataset.artist || card.querySelector('.card-subtitle')?.textContent || '';
+            const cover = card.dataset.cover || card.querySelector('.card-cover')?.src || '';
+            const query = `${artists} ${name}`.trim();
+            if (query) streamTrack(query, name, artists, cover);
+            return;
+        }
+
         // If card-dl (download) button was clicked on a track card
         if (e.target.closest('.card-dl')) {
             const url = card.dataset.url;
@@ -386,23 +402,36 @@ function openDetailView(item) {
 
     // Setup detail buttons
     const btnDownload = document.getElementById('btn-detail-download');
+    const btnStream = document.getElementById('btn-detail-stream');
     const btnAddPlaylist = document.getElementById('btn-detail-add-playlist');
     const btnOpenSpotify = document.getElementById('btn-detail-open-spotify');
 
     // Restore button visibility (may have been hidden by playlist view)
     btnDownload.style.display = '';
+    btnStream.style.display = '';
     btnAddPlaylist.style.display = '';
     btnOpenSpotify.style.display = '';
 
-    // Playlists can't be downloaded directly via SpotiFLAC
+    // Playlists can't be downloaded/streamed directly
     if (item.type === 'playlist') {
         btnDownload.style.display = 'none';
+        btnStream.style.display = 'none';
         btnAddPlaylist.style.display = 'none';
+    }
+
+    // Artists can't be streamed directly
+    if (item.type === 'artist') {
+        btnStream.style.display = 'none';
     }
 
     btnDownload.onclick = () => {
         if (item.url) downloadFromDetail(item.url);
         else showToast('No Spotify URL available', 'error');
+    };
+    btnStream.onclick = () => {
+        const query = `${item.artists || ''} ${item.name || ''}`.trim();
+        if (query) streamTrack(query, item.name, item.artists, item.cover);
+        else showToast('No track info to stream', 'error');
     };
     btnAddPlaylist.onclick = () => openPlaylistPicker(item);
     btnOpenSpotify.onclick = () => {
@@ -475,12 +504,18 @@ function setupModals() {
         document.getElementById('settings-modal').style.display = 'flex';
         document.getElementById('settings-theme').value = state.theme;
         document.getElementById('settings-quality').value = state.defaultQuality;
+        document.getElementById('settings-downloader').value = state.defaultDownloader;
+        fetchAvailableDownloaders();
     });
     document.getElementById('settings-close').addEventListener('click', () => {
         document.getElementById('settings-modal').style.display = 'none';
     });
     document.getElementById('settings-modal').addEventListener('click', (e) => {
-        if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+        if (e.target === e.currentTarget) {
+            e.currentTarget.style.display = 'none';
+            // Refresh downloader options when settings open
+            fetchAvailableDownloaders();
+        }
     });
 
     // Playlist picker modal
@@ -504,6 +539,12 @@ function setupSettings() {
     document.getElementById('settings-quality').addEventListener('change', (e) => {
         state.defaultQuality = e.target.value;
         localStorage.setItem('glitchi-quality', e.target.value);
+    });
+    document.getElementById('settings-downloader').addEventListener('change', (e) => {
+        state.defaultDownloader = e.target.value;
+        localStorage.setItem('glitchi-downloader', e.target.value);
+        devLog('Downloader changed', { downloader: e.target.value });
+        showToast(`Download engine: ${e.target.value}`, 'info');
     });
 
     // Dev unlock
@@ -657,14 +698,56 @@ function playFile(filename) {
         state.currentAudio = null;
     }
     devLog('Playing local file', { filename });
+
+    // Show player bar
+    const playerBar = document.getElementById('player-bar');
+    playerBar.style.display = '';
+
+    const displayName = filename.split('/').pop() || filename;
+    document.getElementById('player-track-name').textContent = displayName;
+    document.getElementById('player-artist-name').textContent = 'Downloaded file';
+    document.getElementById('player-time-current').textContent = '0:00';
+    document.getElementById('player-progress-fill').style.width = '0%';
+    document.getElementById('player-cover-img').style.display = 'none';
+
+    const playBtn = document.getElementById('ctrl-play');
+    playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+
     const audio = new Audio(`/files/stream?filename=${encodeURIComponent(filename)}`);
+    state.currentAudio = audio;
+    state.playerTrack = { name: displayName, artists: 'Downloaded file', cover: null };
+
+    audio.addEventListener('loadedmetadata', () => {
+        document.getElementById('player-time-total').textContent = formatTime(audio.duration || 0);
+    });
+
+    audio.addEventListener('play', () => {
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/></svg>';
+    });
+
+    audio.addEventListener('pause', () => {
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+    });
+
+    audio.addEventListener('timeupdate', () => {
+        if (audio.duration) {
+            const pct = (audio.currentTime / audio.duration) * 100;
+            document.getElementById('player-progress-fill').style.width = `${pct}%`;
+            document.getElementById('player-time-current').textContent = formatTime(audio.currentTime);
+        }
+    });
+
+    audio.addEventListener('ended', () => {
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+    });
+
     audio.addEventListener('error', () => {
         showToast('Failed to play file', 'error');
         devLog('Playback error', { filename });
     });
+
     audio.play().catch(() => showToast('Playback blocked by browser. Click play to try again.', 'error'));
-    state.currentAudio = audio;
-    showToast(`Playing: ${filename}`, 'info');
+    showToast(`Playing: ${displayName}`, 'info');
 }
 
 function downloadFile(filename) {
@@ -674,6 +757,143 @@ function downloadFile(filename) {
 }
 
 // ===== Player bar is hidden — download-only mode =====
+
+// ===== Streaming (yt-dlp powered, zero-disk) =====
+
+async function streamTrack(query, name, artists, cover) {
+    devLog('Streaming track', { query, name, artists });
+
+    // Stop any existing playback
+    if (state.currentAudio) {
+        state.currentAudio.pause();
+        state.currentAudio.remove();
+        state.currentAudio = null;
+    }
+
+    // Show player bar
+    const playerBar = document.getElementById('player-bar');
+    playerBar.style.display = '';
+
+    // Update player info
+    document.getElementById('player-track-name').textContent = name || query;
+    document.getElementById('player-artist-name').textContent = artists || '';
+    document.getElementById('player-time-current').textContent = '0:00';
+    document.getElementById('player-time-total').textContent = '...';
+    document.getElementById('player-progress-fill').style.width = '0%';
+
+    const coverImg = document.getElementById('player-cover-img');
+    if (cover) {
+        coverImg.src = cover;
+        coverImg.style.display = '';
+    } else {
+        coverImg.style.display = 'none';
+    }
+
+    // Show loading state on play button
+    const playBtn = document.getElementById('ctrl-play');
+    playBtn.innerHTML = '<div class="spinner" style="width:18px;height:18px;border-width:2px;margin:0"></div>';
+
+    // Stream audio from yt-dlp endpoint (zero disk I/O)
+    const audio = new Audio(`/stream/audio?q=${encodeURIComponent(query)}`);
+    state.currentAudio = audio;
+    state.playerTrack = { name, artists, cover, query };
+
+    audio.addEventListener('loadedmetadata', () => {
+        document.getElementById('player-time-total').textContent = formatTime(audio.duration || 0);
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+    });
+
+    audio.addEventListener('play', () => {
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/></svg>';
+    });
+
+    audio.addEventListener('pause', () => {
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+    });
+
+    audio.addEventListener('timeupdate', () => {
+        if (audio.duration) {
+            const pct = (audio.currentTime / audio.duration) * 100;
+            document.getElementById('player-progress-fill').style.width = `${pct}%`;
+            document.getElementById('player-time-current').textContent = formatTime(audio.currentTime);
+        }
+    });
+
+    audio.addEventListener('ended', () => {
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+        document.getElementById('player-progress-fill').style.width = '0%';
+        document.getElementById('player-time-current').textContent = '0:00';
+    });
+
+    audio.addEventListener('error', () => {
+        showToast('Failed to stream track. Try downloading instead.', 'error');
+        devLog('Stream error', { query });
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+    });
+
+    try {
+        await audio.play();
+        showToast(`Streaming: ${name || query}`, 'info');
+    } catch (e) {
+        showToast('Playback blocked. Click play to start.', 'info');
+        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
+        devLog('Autoplay blocked', { error: e.message });
+    }
+}
+
+function formatTime(seconds) {
+    if (!seconds || isNaN(seconds)) return '0:00';
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// ===== Player Bar Setup =====
+function setupPlayerBar() {
+    // Play/Pause
+    document.getElementById('ctrl-play').addEventListener('click', () => {
+        if (!state.currentAudio) return;
+        if (state.currentAudio.paused) {
+            state.currentAudio.play().catch(() => {});
+        } else {
+            state.currentAudio.pause();
+        }
+    });
+
+    // Progress bar click to seek
+    document.getElementById('player-progress-track').addEventListener('click', (e) => {
+        if (!state.currentAudio || !state.currentAudio.duration) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        const pct = (e.clientX - rect.left) / rect.width;
+        state.currentAudio.currentTime = pct * state.currentAudio.duration;
+    });
+
+    // Volume
+    const volumeSlider = document.getElementById('player-volume-slider');
+    volumeSlider.addEventListener('input', () => {
+        if (state.currentAudio) {
+            state.currentAudio.volume = volumeSlider.value / 100;
+        }
+    });
+    document.getElementById('ctrl-volume').addEventListener('click', () => {
+        if (state.currentAudio) {
+            const muted = !state.currentAudio.muted;
+            state.currentAudio.muted = muted;
+            document.getElementById('ctrl-volume').classList.toggle('active', muted);
+        }
+    });
+
+    // Close player
+    document.getElementById('ctrl-close-player').addEventListener('click', () => {
+        if (state.currentAudio) {
+            state.currentAudio.pause();
+            state.currentAudio.remove();
+            state.currentAudio = null;
+        }
+        state.playerTrack = null;
+        document.getElementById('player-bar').style.display = 'none';
+    });
+}
 
 // ===== Render Search Results =====
 function renderSearchResults(data, query) {
@@ -691,7 +911,10 @@ function renderSearchResults(data, query) {
                 <div class="card-title">${escapeHtml(t.name)}</div>
                 <div class="card-subtitle">${escapeHtml(t.artists)}</div>
                 <div class="card-meta">${escapeHtml(t.album)} &middot; ${formatDuration(t.duration_ms)}</div>
-                                <button class="card-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                <div class="card-actions-row">
+                    <button class="card-stream" title="Stream"><svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
+                    <button class="card-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+                </div>
             </div>`;
         });
         html += '</div></div>';
@@ -769,7 +992,7 @@ async function triggerDownload() {
     if (!url) { showToast('Please enter a Spotify URL', 'error'); return; }
     if (!url.includes('spotify.com')) { showToast('Please enter a valid Spotify URL', 'error'); return; }
 
-    devLog('Starting task-based download from tab', { url, quality: qualityEl.value });
+    devLog('Starting task-based download from tab', { url, quality: qualityEl.value, downloader: state.defaultDownloader });
     startDownloadWithProgress(url, 'tab');
 }
 
@@ -818,7 +1041,7 @@ async function startDownloadWithProgress(url, source) {
         const res = await fetch('/download/task', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, quality: state.defaultQuality }),
+            body: JSON.stringify({ url, quality: state.defaultQuality, downloader: state.defaultDownloader }),
         });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: 'Failed to start download' }));
@@ -908,13 +1131,15 @@ function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source
                     // Add file to this browser's localStorage list, then refresh the tab
                     trackDownloadedFile(task.filename);
 
-                    // Hide progress after a moment
+                    // Show player bar with the downloaded file after download
                     setTimeout(() => {
                         progressEl.classList.add('hidden');
                         if (source === 'tab') {
                             document.getElementById('download-url').value = '';
                         }
                         renderLocalFiles();
+                        // Show player bar and play the downloaded file
+                        playFile(task.filename);
                     }, 2000);
                 }
             } else if (task.status === 'failed') {
@@ -1281,4 +1506,48 @@ function escapeHtml(str) {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+}
+
+// ===== Fetch Available Downloaders =====
+async function fetchAvailableDownloaders() {
+    try {
+        const res = await fetch('/download/available');
+        if (!res.ok) return;
+        const data = await res.json();
+        const sel = document.getElementById('settings-downloader');
+        if (!sel) return;
+
+        // Save current selection
+        const current = state.defaultDownloader;
+
+        // Rebuild options based on actually available downloaders
+        sel.innerHTML = '';
+        const allOptions = [
+            { value: 'spotiflac', label: 'SpotiFLAC (Lossless, Qobuz/Tidal)' },
+            { value: 'ytdlp', label: 'yt-dlp (YouTube Audio)' },
+            { value: 'spotdl', label: 'SpotDL (Spotify → YouTube)' },
+        ];
+
+        for (const opt of allOptions) {
+            const available = data.available.includes(opt.value);
+            const option = document.createElement('option');
+            option.value = opt.value;
+            option.textContent = opt.label + (available ? '' : ' [NOT INSTALLED]');
+            option.disabled = !available;
+            sel.appendChild(option);
+        }
+
+        // Restore or fallback
+        if (data.available.includes(current)) {
+            sel.value = current;
+        } else if (data.available.length > 0) {
+            sel.value = data.available[0];
+            state.defaultDownloader = data.available[0];
+            localStorage.setItem('glitchi-downloader', data.available[0]);
+        }
+
+        devLog('Available downloaders', { current: sel.value, available: data.available });
+    } catch (e) {
+        devLog('Failed to fetch downloaders', { error: e.message });
+    }
 }

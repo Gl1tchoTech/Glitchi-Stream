@@ -8,6 +8,7 @@ class DownloadRequest(BaseModel):
     quality: Optional[str] = "LOSSLESS"
     timeout_s: Optional[int] = 10
     track_max_retries: Optional[int] = 3
+    downloader: Optional[str] = None  # spotiflac | ytdlp | spotdl (overrides default)
 
 
 class SearchRequest(BaseModel):
