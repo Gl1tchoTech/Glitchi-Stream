@@ -814,6 +814,17 @@ async def download_ytdlp(
             search_query = metadata["title"]
         logger.info(f"yt-dlp search query: {search_query}")
 
+    # Enrich metadata with frontend-provided artist/title so they reach the tag injector.
+    # SpotAPI's get_track_info may return empty artist for some tracks, but the
+    # frontend search results DO have the correct artist.
+    if frontend_artist or frontend_title:
+        if metadata is None:
+            metadata = {}
+        if frontend_artist and not metadata.get("artist"):
+            metadata["artist"] = frontend_artist
+        if frontend_title and not metadata.get("title"):
+            metadata["title"] = frontend_title
+
     if on_progress:
         await on_progress("downloading", f"Searching YouTube: {search_query[:60]}...")
 
@@ -890,8 +901,8 @@ async def download_ytdlp(
 
         abs_path = os.path.join(settings.DOWNLOAD_DIR, rel_path)
 
-        # Inject metadata
-        final_filename = await _process_metadata_for_file(abs_path, str(req.url), on_progress)
+        # Inject metadata — pass enriched metadata so the frontend artist reaches the tag injector
+        final_filename = await _process_metadata_for_file(abs_path, str(req.url), on_progress, metadata=metadata)
 
         if on_progress:
             await on_progress("complete", final_filename)
