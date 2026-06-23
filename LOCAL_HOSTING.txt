@@ -1,0 +1,217 @@
+═══════════════════════════════════════════════════════════════
+  GLITCHI STREAM — LOCAL HOSTING GUIDE
+═══════════════════════════════════════════════════════════════
+
+Glitchi Stream is a self-hosted web app that lets you search Spotify,
+download tracks in high quality, and stream audio — all from your own
+machine.  Follow the steps below to get it running locally.
+
+
+───────────────────────────────────────────────────────────────
+1.  PREREQUISITES
+───────────────────────────────────────────────────────────────
+
+• Python 3.10 or newer               (python.org)
+• pip (comes with Python)
+• git                                (git-scm.com)
+
+Optional but recommended — at least one of these downloaders:
+
+  ── SpotiFLAC ────────────────────────────────────────────────
+  Installed automatically via pip (SpotiFLAC==1.1.7).
+  Downloads lossless FLAC from Qobuz / Tidal.
+
+  ── yt-dlp ───────────────────────────────────────────────────
+  Installed automatically via pip.
+  Searches YouTube for matching audio and extracts the best
+  available format.  Also powers the streaming feature.
+
+  ── SpotDL ───────────────────────────────────────────────────
+  Installed automatically via pip.
+  Spotify → YouTube matching downloader.
+
+  ▶ All three are Python packages in requirements.txt, so they
+    install in Step 3.  No manual binary setup is needed.
+
+
+───────────────────────────────────────────────────────────────
+2.  CLONE THE PROJECT
+───────────────────────────────────────────────────────────────
+
+  git clone <your-repo-url> glitchi-stream
+  cd glitchi-stream
+
+
+───────────────────────────────────────────────────────────────
+3.  SET UP A VIRTUAL ENVIRONMENT (RECOMMENDED)
+───────────────────────────────────────────────────────────────
+
+  Windows (Command Prompt / PowerShell):
+    python -m venv venv
+    venv\Scripts\activate
+
+  macOS / Linux:
+    python3 -m venv venv
+    source venv/bin/activate
+
+
+───────────────────────────────────────────────────────────────
+4.  INSTALL DEPENDENCIES
+───────────────────────────────────────────────────────────────
+
+  pip install -r requirements.txt
+
+  This installs FastAPI, uvicorn, SpotiFLAC, spotapi, mutagen,
+  yt-dlp, spotdl, httpx, pydantic, and pydantic-settings.
+
+
+───────────────────────────────────────────────────────────────
+5.  CONFIGURE (OPTIONAL)
+───────────────────────────────────────────────────────────────
+
+  Create a .env file in the project root to override defaults:
+
+    # .env
+    PROJECT_NAME="My Glitchi Stream"
+    DOWNLOAD_DIR="./my-music"
+    CLEANUP_AGE_HOURS=48
+    ADMIN_KEY="your-custom-admin-key"
+    DEFAULT_DOWNLOADER="spotiflac"
+
+  ┌─────────────────────────────────────────────────────────┐
+  │ DEFAULT_DOWNLOADER options                              │
+  │   spotiflac  — lossless FLAC via Qobuz/Tidal (default)  │
+  │   ytdlp      — best audio from YouTube                  │
+  │   spotdl     — Spotify → YouTube via SpotDL             │
+  │                                                         │
+  │ You can also switch downloaders at runtime in the UI    │
+  │ under Settings → Download Engine.                       │
+  └─────────────────────────────────────────────────────────┘
+
+  If you omit the .env file, the defaults shown above are used.
+
+
+───────────────────────────────────────────────────────────────
+6.  START THE SERVER
+───────────────────────────────────────────────────────────────
+
+  uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  WITHOUT USING VENV:
+  python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  Flags:
+    --host 0.0.0.0    listen on all network interfaces
+    --port 8000       port to bind (change if in use)
+    --reload          auto-restart on code changes (dev only)
+
+  You should see:
+
+    INFO:     Uvicorn running on http://0.0.0.0:8000
+
+
+───────────────────────────────────────────────────────────────
+7.  OPEN IN YOUR BROWSER
+───────────────────────────────────────────────────────────────
+
+  Local:           http://localhost:8000
+  On your network: http://<your-local-ip>:8000
+
+  (Run "ipconfig" on Windows or "ifconfig" on macOS/Linux
+   to find your local IP address.)
+
+
+───────────────────────────────────────────────────────────────
+8.  ACCESSING FROM OTHER DEVICES (STREAMING OVER WI-FI)
+───────────────────────────────────────────────────────────────
+
+  Once the server is running with --host 0.0.0.0, any device on
+  the same Wi-Fi network can open:
+
+    http://<your-pc-local-ip>:8000
+
+  Example:  http://192.168.1.42:8000
+
+  You can then:
+    • Search Spotify for any track
+    • Click the ▶ Stream button to play audio instantly
+    • Click ⬇ Download to save tracks to your library
+    • Browse and play downloaded files
+
+
+───────────────────────────────────────────────────────────────
+9.  FOLDER STRUCTURE (AFTER FIRST RUN)
+───────────────────────────────────────────────────────────────
+
+  glitchi-stream/
+  ├── app/                  # Python backend
+  │   ├── api/              # HTTP route handlers
+  │   ├── models/           # Pydantic request/response models
+  │   ├── services/         # Business logic (downloaders, search)
+  │   ├── tests/            # Unit tests
+  │   └── utils/            # Logging, validators
+  ├── static/               # Frontend (HTML, JS, CSS)
+  ├── downloads/             # Downloaded music files (auto-created)
+  ├── .env                  # Your config overrides (optional)
+  ├── requirements.txt
+  └── LOCAL_HOSTING.txt     # ← this file
+
+
+───────────────────────────────────────────────────────────────
+10.  TROUBLESHOOTING
+───────────────────────────────────────────────────────────────
+
+  ❌ "ModuleNotFoundError: No module named 'app'"
+     → Make sure you're running uvicorn from the project root
+       (the folder containing the "app" directory).
+
+  ❌ "Port 8000 is already in use"
+     → Use a different port:  --port 8001
+     → Or kill the existing process:
+       Windows:  netstat -ano | findstr :8000  →  taskkill /PID <pid>
+       macOS:    lsof -i :8000  →  kill -9 <pid>
+
+  ❌ SpotiFLAC downloads fail
+     → SpotiFLAC requires a Spotify account.  It may prompt for
+       login on first use.  The app runs SpotiFLAC as a subprocess,
+       so watch the terminal for login prompts.
+     → Try switching to yt-dlp or SpotDL in Settings.
+
+  ❌ yt-dlp / streaming fails
+     → Make sure yt-dlp is installed:  pip install yt-dlp
+     → yt-dlp may need ffmpeg for audio extraction:
+       • Windows:  winget install ffmpeg   or   chocolatey
+       • macOS:    brew install ffmpeg
+       • Linux:    sudo apt install ffmpeg
+
+  ❌ SpotDL not found
+     → Make sure spotdl is installed:  pip install spotdl
+     → SpotDL requires ffmpeg (see above).
+
+  ❌ No downloaders available in Settings
+     → Run:  pip install -r requirements.txt
+     → Check the terminal for any pip install errors.
+
+  ❌ "Connection refused" from other devices
+     → Make sure the firewall allows port 8000:
+       • Windows: allow "Python" through Windows Firewall
+       • macOS:   System Settings → Network → Firewall
+     → Verify the server is started with --host 0.0.0.0 (not
+       --host 127.0.0.1, which only allows localhost).
+
+
+───────────────────────────────────────────────────────────────
+11.  STOPPING THE SERVER
+───────────────────────────────────────────────────────────────
+
+  Press  Ctrl + C  in the terminal window where uvicorn is
+  running.
+
+  Cleanup: The app auto-deletes downloaded files older than
+  CLEANUP_AGE_HOURS (default 24 hours).  You can disable this
+  by setting a very large value in your .env file.
+
+
+───────────────────────────────────────────────────────────────
+  QUESTIONS?  Report issues on the project's GitHub repository.
+═══════════════════════════════════════════════════════════════

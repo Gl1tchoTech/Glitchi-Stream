@@ -10,10 +10,14 @@ All engines share the same metadata-injection pipeline (SpotAPI → mutagen).
 """
 
 import asyncio
+import difflib
 import os
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
+import time
 from typing import Optional, Callable, Awaitable
 
 import httpx
@@ -33,6 +37,9 @@ from app.models.requests import DownloadRequest
 # Binary / availability checks
 # ═══════════════════════════════════════════════════════════════════════
 
+# Module-level ffmpeg availability cache (checked once at import)
+_FFMPEG_AVAILABLE = bool(shutil.which("ffmpeg") or shutil.which("ffmpeg.exe"))
+
 def _find_binary(*names: str) -> Optional[str]:
     """Find the first available binary on PATH."""
     for name in names:
@@ -42,16 +49,50 @@ def _find_binary(*names: str) -> Optional[str]:
     return None
 
 
+def _module_is_importable(module_name: str) -> bool:
+    """Check if a Python module can be imported."""
+    try:
+        __import__(module_name)
+        return True
+    except ImportError:
+        return False
+
+
 def is_spotiflac_available() -> bool:
-    return _find_binary("spotiflac", "spotiflac.exe") is not None
+    """SpotiFLAC is a CLI tool, not a Python module.
+    Check PATH binary and also the pip-installed scripts directory.
+    Also requires ffmpeg on PATH."""
+    # SpotiFLAC needs ffmpeg for audio processing
+    if not _FFMPEG_AVAILABLE:
+        return False
+    if _find_binary("spotiflac", "spotiflac.exe"):
+        return True
+    # Windows: pip installs scripts to PythonXY/Scripts/
+    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
+    for name in ("spotiflac", "spotiflac.exe"):
+        if os.path.isfile(os.path.join(scripts_dir, name)):
+            return True
+    # Also check the user-site scripts directory
+    try:
+        import site
+        user_scripts = os.path.join(site.getusersitepackages().replace("site-packages", "Scripts"))
+        for name in ("spotiflac", "spotiflac.exe"):
+            if os.path.isfile(os.path.join(user_scripts, name)):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def is_ytdlp_available() -> bool:
-    return _find_binary("yt-dlp", "yt-dlp.exe") is not None
+    return _find_binary("yt-dlp", "yt-dlp.exe") is not None or _module_is_importable("yt_dlp")
 
 
 def is_spotdl_available() -> bool:
-    return _find_binary("spotdl", "spotdl.exe") is not None
+    """SpotDL uses yt-dlp under the hood and requires ffmpeg for audio processing."""
+    if not _FFMPEG_AVAILABLE:
+        return False
+    return _find_binary("spotdl", "spotdl.exe") is not None or _module_is_importable("spotdl")
 
 
 def get_available_downloaders() -> list[str]:
@@ -134,7 +175,7 @@ async def _fetch_track_metadata(track_id: str) -> Optional[dict]:
                 "track_number": track_number,
             }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _fetch)
     except Exception as e:
         logger.error(f"SpotAPI metadata fetch error for {track_id}: {type(e).__name__}: {e}")
@@ -144,7 +185,7 @@ async def _fetch_track_metadata(track_id: str) -> Optional[dict]:
 async def _fetch_metadata_fallback(url: str) -> Optional[dict]:
     """Fallback: extract track ID and try query_songs with it.
 
-    Used when direct track_id metadata fetch fails.
+    Used when direct get_track_info fetch fails.
     """
     try:
         from spotapi import Song
@@ -191,7 +232,7 @@ async def _fetch_metadata_fallback(url: str) -> Optional[dict]:
                 "track_number": track_number,
             }
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _search)
     except Exception as e:
         logger.error(f"Fallback metadata search error: {type(e).__name__}: {e}")
@@ -199,7 +240,12 @@ async def _fetch_metadata_fallback(url: str) -> Optional[dict]:
 
 
 async def fetch_metadata(url: str) -> Optional[dict]:
-    """Fetch metadata for a Spotify URL, with fallback."""
+    """Fetch metadata for a Spotify URL, with fallback.
+
+    Tries direct track lookup first.  If that fails entirely (no title),
+    falls back to query_songs search by track ID.  Does NOT enrich artist
+    separately — a missing artist is better than the wrong artist.
+    """
     track_id = extract_track_id(url)
     if track_id:
         metadata = await _fetch_track_metadata(track_id)
@@ -277,6 +323,10 @@ def inject_metadata(filepath: str, metadata: dict, cover_data: Optional[bytes] =
             _inject_mp4(filepath, title, artist, album, year, track_number, cover_data)
         elif ext in (".ogg", ".opus"):
             _inject_ogg(filepath, title, artist, album, year, track_number, cover_data)
+        elif ext == ".webm":
+            _inject_webm(filepath, title, artist, album, year, track_number, cover_data)
+            logger.info(f"Metadata injected: {os.path.basename(filepath)} — {artist} - {title}")
+            return True
         else:
             audio = MutagenFile(filepath)
             if audio is not None and hasattr(audio, "tags") and audio.tags is not None:
@@ -303,8 +353,8 @@ def _inject_mp3(filepath, title, artist, album, year, track_number, cover_data):
         audio = ID3()
     if title:
         audio["TIT2"] = TIT2(encoding=3, text=title)
-    if artist:
-        audio["TPE1"] = TPE1(encoding=3, text=artist)
+    # Always write artist — fall back to "Unknown Artist" so the tag is never missing
+    audio["TPE1"] = TPE1(encoding=3, text=artist or "Unknown Artist")
     if album:
         audio["TALB"] = TALB(encoding=3, text=album)
     if year:
@@ -320,8 +370,8 @@ def _inject_flac(filepath, title, artist, album, year, track_number, cover_data)
     audio = FLAC(filepath)
     if title:
         audio["title"] = title
-    if artist:
-        audio["artist"] = artist
+    # Always write artist — fall back to "Unknown Artist"
+    audio["artist"] = artist or "Unknown Artist"
     if album:
         audio["album"] = album
     if year:
@@ -345,8 +395,8 @@ def _inject_mp4(filepath, title, artist, album, year, track_number, cover_data):
     audio = MP4(filepath)
     if title:
         audio["\xa9nam"] = title
-    if artist:
-        audio["\xa9ART"] = artist
+    # Always write artist — fall back to "Unknown Artist"
+    audio["\xa9ART"] = artist or "Unknown Artist"
     if album:
         audio["\xa9alb"] = album
     if year:
@@ -364,8 +414,8 @@ def _inject_ogg(filepath, title, artist, album, year, track_number, cover_data):
     audio = OggVorbis(filepath)
     if title:
         audio["title"] = title
-    if artist:
-        audio["artist"] = artist
+    # Always write artist — fall back to "Unknown Artist"
+    audio["artist"] = artist or "Unknown Artist"
     if album:
         audio["album"] = album
     if year:
@@ -383,6 +433,98 @@ def _inject_ogg(filepath, title, artist, album, year, track_number, cover_data):
             pic.height = 300
         audio["metadata_block_picture"] = base64.b64encode(pic.write()).decode("ascii")
     audio.save()
+
+
+def _inject_webm(filepath, title, artist, album, year, track_number, cover_data):
+    """Write Matroska/EBML tags directly into a .webm file.
+
+    mutagen doesn't support WebM, so we write raw EBML Tags + AttachedFile
+    elements appended at the end of the file.  Most players (VLC, MPC,
+    browsers) will scan and pick up these tags.
+    """
+    import struct
+
+    # EBML variable-length integer encoding for sizes only
+    def _ebml_vint(value):
+        """Encode an unsigned integer as EBML VINT (used for element sizes)."""
+        if value <= 0x7F:
+            return struct.pack(">B", 0x80 | value)
+        needed = max(1, (value.bit_length() + 6) // 7)
+        buf = bytearray(needed)
+        buf[0] = (1 << (8 - needed)) | ((value >> (7 * (needed - 1))) & ((1 << (8 - needed)) - 1))
+        for i in range(1, needed):
+            buf[i] = (value >> (7 * (needed - 1 - i))) & 0x7F
+        return bytes(buf)
+
+    def _ebml_uint_elem(elem_id: bytes, value: int):
+        """Build a proper EBML UInteger element: ID + VINT(size) + raw bytes."""
+        # Find minimal byte count for the value
+        if value == 0:
+            data = b"\x00"
+        else:
+            byte_len = (value.bit_length() + 7) // 8
+            data = value.to_bytes(byte_len, "big")
+        return elem_id + _ebml_vint(len(data)) + data
+
+    def _ebml_str_elem(elem_id: bytes, s: str):
+        """Build a proper EBML UTF-8 String element."""
+        data = s.encode("utf-8")
+        return elem_id + _ebml_vint(len(data)) + data
+
+    def _ebml_master(elem_id: bytes, children: bytes):
+        """Build an EBML Master element containing child elements."""
+        return elem_id + _ebml_vint(len(children)) + children
+
+    # ── Build SimpleTag elements ───────────────────────────────
+    simple_tags = b""
+    def _add_tag(name, value):
+        nonlocal simple_tags
+        tn = _ebml_str_elem(b"\x45\xA3", name)      # TagName
+        ts = _ebml_str_elem(b"\x44\x87", value)     # TagString
+        simple_tags += _ebml_master(b"\x67\xC8", tn + ts)  # SimpleTag
+
+    if title:
+        _add_tag("TITLE", title)
+    # Always write ARTIST tag — fall back to "Unknown Artist"
+    _add_tag("ARTIST", artist or "Unknown Artist")
+    if album:
+        _add_tag("ALBUM", album)
+    if year:
+        _add_tag("DATE", str(year))
+    if track_number:
+        _add_tag("TRACK_NUMBER", str(track_number))
+
+    if not simple_tags:
+        return
+
+    # ── Build Targets (TargetTypeValue = 50 = track level) ──
+    ttv = _ebml_uint_elem(b"\x68\xCA", 50)         # TargetTypeValue
+    targets = _ebml_master(b"\x63\xC0", ttv)        # Targets
+
+    # ── Build Tag element ─────────────────────────────────────
+    tag = _ebml_master(b"\x73\x73", targets + simple_tags)
+
+    # ── Build Tags element ────────────────────────────────────
+    tags_element = _ebml_master(b"\x12\x54\xC3\x67", tag)
+
+    # ── Add cover art as AttachedFile if provided ─────────────
+    attached_file = b""
+    if cover_data:
+        mime = _guess_mime(cover_data)
+        file_name = "cover.jpg" if "jpeg" in mime else "cover.png"
+        attached = (
+            _ebml_str_elem(b"\x46\x6E", file_name)     # FileName
+            + _ebml_str_elem(b"\x46\x60", mime)        # FileMimeType
+            + _ebml_master(b"\x46\x5C", cover_data)    # FileData (binary)
+            + _ebml_uint_elem(b"\x46\x7E", 6)          # FileUsedInPlayback
+        )
+        attached_file = _ebml_master(b"\x61\xA7", attached)
+
+    # ── Write everything in a single append ───────────────────
+    with open(filepath, "ab") as f:
+        f.write(tags_element + attached_file)
+
+    logger.info(f"WebM EBML tags written: {os.path.basename(filepath)} — {artist} - {title}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -409,8 +551,11 @@ def _move_to_downloads(src_path: str) -> Optional[str]:
     fn = os.path.basename(src_path)
     dest = os.path.join(settings.DOWNLOAD_DIR, fn)
     if os.path.exists(dest):
-        base, ext = os.path.splitext(fn)
-        dest = os.path.join(settings.DOWNLOAD_DIR, f"{base}_{os.urandom(4).hex()}{ext}")
+        # Remove stale file rather than adding random hex suffix
+        try:
+            os.remove(dest)
+        except OSError:
+            pass
     try:
         shutil.move(src_path, dest)
         return os.path.relpath(dest, settings.DOWNLOAD_DIR)
@@ -430,14 +575,19 @@ def _cleanup_dir(d: str) -> None:
 async def _process_metadata_for_file(
     filepath: str, url: str,
     on_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
+    metadata: Optional[dict] = None,
 ) -> str:
-    """Fetch metadata, inject tags, rename file. Returns relative filename."""
+    """Fetch metadata, inject tags, rename file. Returns relative filename.
+
+    If *metadata* is provided (pre-enriched by the caller), skips the internal
+    ``fetch_metadata()`` call.
+    """
     rel = os.path.relpath(filepath, settings.DOWNLOAD_DIR)
 
-    if on_progress:
-        await on_progress("processing", "Fetching track metadata...")
-
-    metadata = await fetch_metadata(url)
+    if metadata is None:
+        if on_progress:
+            await on_progress("processing", "Fetching track metadata...")
+        metadata = await fetch_metadata(url)
 
     if metadata and metadata.get("title"):
         if on_progress:
@@ -456,15 +606,29 @@ async def _process_metadata_for_file(
         new_name = f"{safe_name}{ext}"
         new_path = os.path.join(settings.DOWNLOAD_DIR, new_name)
         if os.path.exists(new_path) and os.path.abspath(new_path) != os.path.abspath(filepath):
-            base, e = os.path.splitext(new_name)
-            new_name = f"{base}_{os.urandom(3).hex()}{e}"
-            new_path = os.path.join(settings.DOWNLOAD_DIR, new_name)
+            # Remove stale file so rename succeeds without random hex
+            try:
+                os.remove(new_path)
+                logger.info(f"Removed stale file: {new_path}")
+            except OSError:
+                pass
         try:
             os.rename(filepath, new_path)
             logger.info(f"Renamed: {os.path.basename(filepath)} -> {new_name}")
             return os.path.relpath(new_path, settings.DOWNLOAD_DIR)
         except OSError as e:
             logger.warning(f"Failed to rename file: {e}")
+            # If rename failed because dest exists (race), add a timestamp suffix
+            if os.path.exists(new_path):
+                try:
+                    base, e = os.path.splitext(new_name)
+                    new_name = f"{base}_{int(time.time())}{e}"
+                    new_path2 = os.path.join(settings.DOWNLOAD_DIR, new_name)
+                    os.rename(filepath, new_path2)
+                    logger.info(f"Renamed (timestamp): {os.path.basename(filepath)} -> {new_name}")
+                    return os.path.relpath(new_path2, settings.DOWNLOAD_DIR)
+                except OSError:
+                    pass
     else:
         logger.warning(f"No metadata found for {url} — file will not be tagged")
 
@@ -472,61 +636,101 @@ async def _process_metadata_for_file(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Engine 1: SpotiFLAC (subprocess)
+# Engine 1: SpotiFLAC (subprocess via thread executor)
 # ═══════════════════════════════════════════════════════════════════════
+
+def _find_spotiflac_binary() -> Optional[str]:
+    """Find the spotiflac executable, searching PATH and pip scripts dirs."""
+    for name in ("spotiflac", "spotiflac.exe"):
+        path = shutil.which(name)
+        if path:
+            return path
+    # Check Python Scripts directory (pip install location on Windows)
+    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
+    for name in ("spotiflac", "spotiflac.exe"):
+        full = os.path.join(scripts_dir, name)
+        if os.path.isfile(full):
+            return full
+    # Check user-site scripts directory
+    try:
+        import site
+        user_scripts = os.path.join(site.getusersitepackages().replace("site-packages", "Scripts"))
+        for name in ("spotiflac", "spotiflac.exe"):
+            full = os.path.join(user_scripts, name)
+            if os.path.isfile(full):
+                return full
+    except Exception:
+        pass
+    return None
+
+
+def _build_spotiflac_cmd(req: DownloadRequest, temp_dir: str) -> list[str]:
+    """Build the SpotiFLAC command."""
+    binary = _find_spotiflac_binary()
+    if binary:
+        cmd = [binary]
+    else:
+        cmd = [sys.executable, "-m", "spotiflac"]
+    cmd.extend([str(req.url), temp_dir])
+    if req.services:
+        cmd.extend(["--service", *req.services])
+    if req.quality:
+        cmd.extend(["--quality", req.quality])
+    return cmd
+
 
 async def download_spotiflac(
     req: DownloadRequest,
     on_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> Optional[str]:
-    """Download via SpotiFLAC subprocess. Returns relative filename or None."""
-    spotiflac_bin = _find_binary("spotiflac", "spotiflac.exe")
-    if not spotiflac_bin:
-        msg = "SpotiFLAC binary not found. Install with: pip install spotiflac"
+    """Download via SpotiFLAC subprocess (runs in thread executor to avoid
+    Windows asyncio event-loop incompatibility).
+    """
+    if not is_spotiflac_available():
+        msg = "SpotiFLAC not available. Install with: pip install spotiflac"
         logger.error(msg)
         if on_progress:
             await on_progress("failed", msg)
         return None
 
     temp_dir = tempfile.mkdtemp(prefix="spotiflac_", dir=settings.DOWNLOAD_DIR)
-    cmd_args = [spotiflac_bin, str(req.url), temp_dir]
-    if req.services:
-        cmd_args.extend(["--service", *req.services])
-    if req.quality:
-        cmd_args.extend(["--quality", req.quality])
-
+    cmd_args = _build_spotiflac_cmd(req, temp_dir)
     timeout = req.timeout_s if req.timeout_s and req.timeout_s >= 30 else 600
 
     try:
         if on_progress:
             await on_progress("downloading", "Starting SpotiFLAC download...")
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        if on_progress:
-            await on_progress("downloading", "Downloading from Spotify (SpotiFLAC)...")
-
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=float(timeout))
-        except asyncio.TimeoutError:
-            logger.error(f"SpotiFLAC timed out after {timeout}s for {req.url}")
+        def _run():
+            proc = subprocess.Popen(
+                cmd_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
             try:
+                stdout, stderr = proc.communicate(timeout=float(timeout))
+                return proc.returncode, stdout, stderr
+            except subprocess.TimeoutExpired:
                 proc.kill()
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except Exception:
-                pass
+                proc.communicate()
+                return None, None, None
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _run)
+
+        if result[0] is None:
+            # Timeout
+            logger.error(f"SpotiFLAC timed out after {timeout}s for {req.url}")
             if on_progress:
                 await on_progress("failed", f"Download timed out after {timeout}s")
             _cleanup_dir(temp_dir)
             return None
 
-        if proc.returncode != 0:
-            err_msg = stderr.decode().strip()[:200] or "Unknown error"
-            logger.error(f"SpotiFLAC failed (exit {proc.returncode}) for {req.url}: {err_msg}")
+        returncode, stdout, stderr = result
+
+        if returncode != 0:
+            err_msg = (stderr.decode(errors="replace") or stdout.decode(errors="replace")).strip()[:200] or "Unknown error"
+            logger.error(f"SpotiFLAC failed (exit {returncode}) for {req.url}: {err_msg}")
             if on_progress:
                 await on_progress("failed", err_msg)
             _cleanup_dir(temp_dir)
@@ -593,11 +797,21 @@ async def download_ytdlp(
     if on_progress:
         await on_progress("pending", "Fetching track info...")
 
-    # Get metadata first so we can build a good search query
+    # Build search query — prefer frontend-provided artist/title (SpotAPI search
+    # results DO return artists, even when get_track_info doesn't)
     metadata = await fetch_metadata(str(req.url))
     search_query = str(req.url)
-    if metadata and metadata.get("artist") and metadata.get("title"):
-        search_query = f"{metadata['artist']} - {metadata['title']}"
+
+    frontend_artist = req.artist
+    frontend_title = req.title
+    if frontend_artist and frontend_title:
+        search_query = f"{frontend_artist} - {frontend_title}"
+        logger.info(f"yt-dlp search query (from frontend): {search_query}")
+    elif metadata and metadata.get("title"):
+        if metadata.get("artist"):
+            search_query = f"{metadata['artist']} - {metadata['title']}"
+        else:
+            search_query = metadata["title"]
         logger.info(f"yt-dlp search query: {search_query}")
 
     if on_progress:
@@ -616,6 +830,7 @@ async def download_ytdlp(
 
 
 
+    # Always convert to MP3 via FFmpegExtractAudio — universal ID3 tag support
     ydl_opts = {
         "format": fmt,
         "outtmpl": out_tmpl,
@@ -624,32 +839,48 @@ async def download_ytdlp(
         "no_warnings": True,
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3" if req.quality != "LOSSLESS" else "best",
+            "preferredcodec": "mp3",
         }],
     }
 
     try:
+        # Capture metadata for title matching inside the executor
+        _spotify_title = metadata.get("title", "") if metadata else ""
+
         def _run_ytdlp():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch:{search_query}", download=True)
-                if info and "entries" in info and info["entries"]:
-                    entry = info["entries"][0]
-                    # yt-dlp may add extension to the output template
-                    title = entry.get("title", "unknown")
-                    ext = entry.get("ext", "webm")
-                    # Find the downloaded file
-                    for fn in os.listdir(settings.DOWNLOAD_DIR):
-                        full = os.path.join(settings.DOWNLOAD_DIR, fn)
-                        if os.path.isfile(full) and os.path.getmtime(full) > time.time() - 60:
-                            if fn.startswith(title[:30]) or title[:30] in fn:
-                                ext_lower = os.path.splitext(fn)[1].lower()
-                                if ext_lower in {".mp3", ".webm", ".m4a", ".opus", ".ogg", ".flac", ".wav"}:
-                                    return os.path.relpath(full, settings.DOWNLOAD_DIR)
-                    # Fallback: return newest audio file
-                    return _find_newest_audio()
+            # Step 1: search YouTube for top 5 results (don't download yet)
+            search_opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
+            with yt_dlp.YoutubeDL(search_opts) as ydl:
+                info = ydl.extract_info(f"ytsearch5:{search_query}", download=False)
+
+            if not info or "entries" not in info or not info["entries"]:
                 return None
 
-        loop = asyncio.get_event_loop()
+            entries = info["entries"]
+
+            # Step 2: pick the best match by title similarity
+            best = _pick_best_match(entries, _spotify_title)
+            if not best:
+                return None
+
+            logger.info(f"Best match: {best.get('title', '?')} (id={best.get('id', '?')})")
+
+            # Step 3: download ONLY the best match
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([best["webpage_url"]])
+
+            # Step 4: find the downloaded file
+            yt_title = best.get("title", "unknown")
+            for fn in os.listdir(settings.DOWNLOAD_DIR):
+                full = os.path.join(settings.DOWNLOAD_DIR, fn)
+                if os.path.isfile(full) and os.path.getmtime(full) > time.time() - 120:
+                    if fn.startswith(yt_title[:30]) or yt_title[:30] in fn:
+                        ext_lower = os.path.splitext(fn)[1].lower()
+                        if ext_lower in {".mp3", ".webm", ".m4a", ".opus", ".ogg", ".flac", ".wav"}:  # .mp3 first (FFmpegExtractAudio default)
+                            return os.path.relpath(full, settings.DOWNLOAD_DIR)
+            return _find_newest_audio()
+
+        loop = asyncio.get_running_loop()
         rel_path = await loop.run_in_executor(None, _run_ytdlp)
 
         if not rel_path:
@@ -676,6 +907,42 @@ async def download_ytdlp(
 
 
 
+def _title_similarity(a: str, b: str) -> float:
+    """Score 0.0-1.0 how similar two titles are, ignoring case/symbols."""
+    a_clean = re.sub(r"[^a-z0-9\s]", "", a.lower())
+    b_clean = re.sub(r"[^a-z0-9\s]", "", b.lower())
+    return difflib.SequenceMatcher(None, a_clean.strip(), b_clean.strip()).ratio()
+
+
+def _pick_best_match(entries: list, target_title: str) -> Optional[dict]:
+    """From a list of yt-dlp search entries, pick the one whose title
+    is most similar to target_title.  Returns the best entry or None."""
+    if not entries:
+        return None
+    if not target_title:
+        return entries[0]
+
+    best_entry = None
+    best_score = 0.0
+    for entry in entries:
+        entry_title = entry.get("title", "")
+        score = _title_similarity(target_title, entry_title)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+
+    # Require at least 30% similarity; otherwise fall back to first result
+    if best_score < 0.3:
+        logger.warning(
+            f"Low title match (best={best_score:.2f}), using first result: "
+            f"{entries[0].get('title', '?')}"
+        )
+        return entries[0]
+
+    logger.info(f"Title match: score={best_score:.2f} for '{best_entry.get('title', '?')}'")
+    return best_entry
+
+
 def _find_newest_audio() -> Optional[str]:
     """Find the most recently modified audio file in DOWNLOAD_DIR."""
     audio_exts = {".mp3", ".flac", ".m4a", ".wav", ".ogg", ".opus", ".aac", ".webm"}
@@ -698,17 +965,37 @@ def _find_newest_audio() -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Engine 3: SpotDL (subprocess)
+# Engine 3: SpotDL (subprocess via thread executor)
 # ═══════════════════════════════════════════════════════════════════════
+
+def _build_spotdl_cmd(req: DownloadRequest, temp_dir: str) -> list[str]:
+    """Build the SpotDL command. Tries binary first, then python -m."""
+    binary = _find_binary("spotdl", "spotdl.exe")
+    if binary:
+        cmd = [binary]
+    else:
+        cmd = [sys.executable, "-m", "spotdl"]
+    cmd.extend(["download", str(req.url), "--output", temp_dir])
+    if req.quality == "LOSSLESS":
+        cmd.extend(["--format", "flac"])
+    elif req.quality == "HIGH":
+        cmd.extend(["--bitrate", "320k"])
+    else:
+        cmd.extend(["--bitrate", "160k"])
+    return cmd
+
 
 async def download_spotdl(
     req: DownloadRequest,
     on_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> Optional[str]:
-    """Download via SpotDL CLI subprocess."""
-    spotdl_bin = _find_binary("spotdl", "spotdl.exe")
-    if not spotdl_bin:
-        msg = "SpotDL not found. Install with: pip install spotdl"
+    """Download via SpotDL CLI (runs in thread executor).
+
+    Injects a monkey-patch via PYTHONSTARTUP to fix the SpotipyFree
+    ``KeyError: 'uri'`` bug before SpotDL runs.
+    """
+    if not is_spotdl_available():
+        msg = "SpotDL not available. Install with: pip install spotdl"
         logger.error(msg)
         if on_progress:
             await on_progress("failed", msg)
@@ -717,48 +1004,68 @@ async def download_spotdl(
     if on_progress:
         await on_progress("downloading", "Starting SpotDL download...")
 
-    # SpotDL handles its own metadata, so use a temp output dir
     temp_dir = tempfile.mkdtemp(prefix="spotdl_", dir=settings.DOWNLOAD_DIR)
-
-    cmd_args = [
-        spotdl_bin, "download", str(req.url),
-        "--output", temp_dir,
-    ]
-
-    # Map quality
-    if req.quality == "LOSSLESS":
-        cmd_args.extend(["--format", "flac"])
-    elif req.quality == "HIGH":
-        cmd_args.extend(["--bitrate", "320k"])
-    else:
-        cmd_args.extend(["--bitrate", "160k"])
-
+    cmd_args = _build_spotdl_cmd(req, temp_dir)
     timeout = req.timeout_s if req.timeout_s and req.timeout_s >= 30 else 600
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd_args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    # Write a sitecustomize.py to monkey-patch SpotipyFree before SpotDL loads.
+    # Python's site module imports sitecustomize.py before any user code, so
+    # the patch applies before spotdl touches SpotipyFree.
+    sitecustomize_path = os.path.join(temp_dir, "sitecustomize.py")
+    with open(sitecustomize_path, "w") as f:
+        f.write("""
+from SpotipyFree.Formatter import SpotifyFormatter
+_spotdl_original_fmt = SpotifyFormatter.formatTrack
 
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=float(timeout))
-        except asyncio.TimeoutError:
-            logger.error(f"SpotDL timed out after {timeout}s for {req.url}")
+@staticmethod
+def _spotdl_patched_formatTrack(track, formattedArtists, songId=None, album=[]):
+    if songId is None:
+        uri = track.get("uri", "")
+        if uri:
+            songId = uri.removeprefix("spotify:track:")
+        else:
+            songId = track.get("id", "")
+    return _spotdl_original_fmt(track, formattedArtists, songId=songId, album=album)
+
+SpotifyFormatter.formatTrack = _spotdl_patched_formatTrack
+""")
+
+    sub_env = os.environ.copy()
+    # Prepend temp_dir to sys.path so sitecustomize.py is found
+    pp = sub_env.get("PYTHONPATH", "")
+    sub_env["PYTHONPATH"] = temp_dir + (os.pathsep + pp if pp else "")
+
+    try:
+        def _run():
+            proc = subprocess.Popen(
+                cmd_args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=sub_env,
+            )
             try:
+                stdout, stderr = proc.communicate(timeout=float(timeout))
+                return proc.returncode, stdout, stderr
+            except subprocess.TimeoutExpired:
                 proc.kill()
-                await asyncio.wait_for(proc.wait(), timeout=10)
-            except Exception:
-                pass
+                proc.communicate()
+                return None, None, None
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _run)
+
+        if result[0] is None:
+            logger.error(f"SpotDL timed out after {timeout}s for {req.url}")
             if on_progress:
                 await on_progress("failed", f"SpotDL timed out after {timeout}s")
             _cleanup_dir(temp_dir)
             return None
 
-        if proc.returncode != 0:
-            err_msg = (stderr.decode() or stdout.decode()).strip()[:200] or "Unknown error"
-            logger.error(f"SpotDL failed (exit {proc.returncode}) for {req.url}: {err_msg}")
+        returncode, stdout, stderr = result
+
+        if returncode != 0:
+            err_msg = (stderr.decode(errors="replace") or stdout.decode(errors="replace")).strip()[:200] or "Unknown error"
+            logger.error(f"SpotDL failed (exit {returncode}) for {req.url}: {err_msg}")
             if on_progress:
                 await on_progress("failed", err_msg)
             _cleanup_dir(temp_dir)
@@ -769,7 +1076,6 @@ async def download_spotdl(
 
         audio_path = _find_audio_in_dir(temp_dir)
         if not audio_path:
-            # SpotDL might download to a subdirectory
             for root, _, files in os.walk(temp_dir):
                 for fn in files:
                     ext = os.path.splitext(fn)[1].lower()
@@ -792,7 +1098,6 @@ async def download_spotdl(
                 await on_progress("failed", "Failed to move SpotDL file")
             return None
 
-        # SpotDL already tags files, but run our pipeline for consistency
         abs_path = os.path.join(settings.DOWNLOAD_DIR, rel_path)
         final_filename = await _process_metadata_for_file(abs_path, str(req.url), on_progress)
 

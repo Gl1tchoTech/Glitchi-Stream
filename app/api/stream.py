@@ -16,18 +16,25 @@ router = APIRouter(prefix="/stream", tags=["Stream"])
 async def stream_audio(
     q: str = Query(..., description="Search query (track name + artist)", min_length=1),
 ):
-    """Stream audio from YouTube via yt-dlp subprocess stdout.
+    """Stream audio from YouTube via yt-dlp URL resolution + httpx proxy.
 
-    yt-dlp searches YouTube, picks the best audio format, and remuxes it
-to stdout.  We stream those bytes to the browser as they arrive.
+    yt-dlp resolves the best audio URL (no subprocess needed), then we
+    proxy those bytes to the browser as they arrive.
     **Zero bytes touch the disk.**
 
     No ``Content-Disposition`` header is set so the browser treats this
     as progressive streaming media, not a file download.
     """
+    # Resolve first to get the actual content type from the audio URL
+    info = await ytdlp_streamer.resolve_stream(q)
+    if not info or not info.get("url"):
+        raise HTTPException(status_code=404, detail=f"No stream found for: {q}")
+
+    media_type = ytdlp_streamer.guess_content_type(info["url"])
+
     return StreamingResponse(
-        ytdlp_streamer.stream_audio_chunks(q),
-        media_type="audio/webm",
+        ytdlp_streamer.stream_audio_chunks(q, info=info),
+        media_type=media_type,
         headers={
             "Cache-Control": "no-cache",
             "Accept-Ranges": "none",

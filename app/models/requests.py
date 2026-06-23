@@ -9,6 +9,8 @@ class DownloadRequest(BaseModel):
     timeout_s: Optional[int] = 10
     track_max_retries: Optional[int] = 3
     downloader: Optional[str] = None  # spotiflac | ytdlp | spotdl (overrides default)
+    artist: Optional[str] = None  # from frontend search results (SpotAPI returns these)
+    title: Optional[str] = None   # from frontend search results
 
 
 class SearchRequest(BaseModel):

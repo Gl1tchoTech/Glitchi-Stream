@@ -10,3 +10,4 @@ redis
 aiofiles
 httpx
 yt-dlp
+ffmpeg

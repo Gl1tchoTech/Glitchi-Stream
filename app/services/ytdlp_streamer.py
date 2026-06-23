@@ -1,15 +1,9 @@
 """yt-dlp Audio Streamer — streams songs directly, zero disk I/O.
 
-Uses two strategies:
-
-1. **Subprocess stdout piping** (primary) — runs ``yt-dlp -o -`` to remux
-   audio to stdout.  yt-dlp handles format selection and ensures the ``moov``
-   atom is at the start so the browser can play *immediately*.  Nothing is
-   written to disk.
-
-2. **URL proxy** (fallback) — extracts a signed YouTube URL via
-   ``extract_info(download=False)`` and proxies chunks via httpx.  Also zero
-   disk I/O, but can suffer from the moov-at-end problem with MP4 audio.
+Uses ``anyio.open_process`` (instead of ``asyncio.create_subprocess_exec``)
+to avoid Windows event-loop incompatibility with uvicorn's SelectorEventLoop.
+yt-dlp handles format selection and ensures the ``moov`` atom is at the start
+so the browser can play *immediately*.  Nothing is written to disk.
 """
 
 import asyncio
@@ -28,55 +22,29 @@ _MAX_CACHE_SIZE = 200
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Primary strategy — yt-dlp subprocess → stdout → browser
+# Primary strategy — yt-dlp subprocess → stdout → browser (via anyio)
 # ═══════════════════════════════════════════════════════════════════════
 
-async def stream_audio_chunks(query: str) -> AsyncGenerator[bytes, None]:
-    """Run yt-dlp as a subprocess, remux audio to stdout, and yield chunks.
+async def stream_audio_chunks(query: str, info: Optional[dict] = None) -> AsyncGenerator[bytes, None]:
+    """Resolve a YouTube audio URL via yt-dlp's Python API, then proxy the
+    raw audio bytes to the browser via httpx.
 
-    yt-dlp handles format selection AND moves the moov atom to the start
-    so the browser can begin playback before the entire file arrives.
+    If *info* is provided (pre-resolved by the caller), skips the internal
+    resolve step — avoids double resolution when the stream endpoint already
+    resolved for media_type detection.
+
+    This avoids subprocess issues on Windows where uvicorn may use a
+    ``SelectorEventLoop`` that doesn't support asyncio subprocesses.
     **Zero bytes are written to disk.**
     """
-    cmd = [
-        "yt-dlp",
-        "--format", "bestaudio/best",
-        "--no-playlist",
-        "--quiet",
-        "--no-warnings",
-        "--output", "-",           # stdout — no file on disk
-        "--no-download-archive",
-        "--no-cache-dir",
-        f"ytsearch:{query}",
-    ]
+    if info is None:
+        info = await resolve_stream(query)
+    if not info or not info.get("url"):
+        logger.error(f"Could not resolve stream URL for: {query}")
+        return
 
-    logger.info(f"yt-dlp stream (subprocess): '{query}'")
-
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        # Stream stdout in 64 KiB chunks
-        while True:
-            chunk = await proc.stdout.read(65536)
-            if not chunk:
-                break
-            yield chunk
-
-        # Wait for process to finish (non-blocking since stdout is done)
-        await proc.wait()
-
-        if proc.returncode != 0 and proc.returncode is not None:
-            stderr = (await proc.stderr.read()).decode(errors="replace")[:200]
-            logger.error(f"yt-dlp subprocess failed ({proc.returncode}): {stderr}")
-
-    except FileNotFoundError:
-        logger.error("yt-dlp binary not found. Install with: pip install yt-dlp")
-    except Exception as e:
-        logger.error(f"yt-dlp subprocess stream error: {type(e).__name__}: {e}")
+    async for chunk in proxy_audio_chunks(info["url"], query):
+        yield chunk
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -112,7 +80,7 @@ async def resolve_stream(query: str) -> Optional[dict]:
             with yt_dlp.YoutubeDL(_get_ydl_opts()) as ydl:
                 return ydl.extract_info(f"ytsearch:{query}", download=False)
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         info = await loop.run_in_executor(None, _extract)
 
         if not info or "entries" not in info or not info["entries"]:

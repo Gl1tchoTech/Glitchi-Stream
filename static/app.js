@@ -1,6 +1,3 @@
-// ===== Constants =====
-const ADMIN_KEY = 'glitchi-admin-2024';
-
 // ===== State =====
 const state = {
     activeTab: 'search',
@@ -331,9 +328,13 @@ function setupResultCardDelegation() {
         // If card-dl (download) button was clicked on a track card
         if (e.target.closest('.card-dl')) {
             const url = card.dataset.url;
+            const artist = card.dataset.artist || '';
+            const title = card.dataset.title || '';
             if (url) {
-                openTab('download'); // show progress bar
-                startDownloadWithProgress(url, 'tab');
+                // Show inline progress bar on this screen (no redirect)
+                card.querySelector('.card-dl').disabled = true;
+                card.querySelector('.card-dl').style.opacity = '0.4';
+                startDownloadWithProgress(url, 'inline', card, { artist, title });
             }
             return;
         }
@@ -425,7 +426,7 @@ function openDetailView(item) {
     }
 
     btnDownload.onclick = () => {
-        if (item.url) downloadFromDetail(item.url);
+        if (item.url) downloadFromDetail(item.url, item.artists, item.name);
         else showToast('No Spotify URL available', 'error');
     };
     btnStream.onclick = () => {
@@ -468,11 +469,11 @@ async function fetchAlbumTracks(albumId, coverUrl) {
                 row.addEventListener('click', (e) => {
                     if (e.target.closest('.track-dl')) {
                         const url = row.dataset.url;
-                        if (url) downloadFromDetail(url);
+                        if (url) downloadFromDetail(url, row.dataset.artist, row.dataset.name);
                         return;
                     }
                     // Clicking the row itself also downloads
-                    if (row.dataset.url) downloadFromDetail(row.dataset.url);
+                    if (row.dataset.url) downloadFromDetail(row.dataset.url, row.dataset.artist, row.dataset.name);
                 });
             });
         } else {
@@ -484,9 +485,9 @@ async function fetchAlbumTracks(albumId, coverUrl) {
     }
 }
 
-async function downloadFromDetail(url) {
-    devLog('Starting task-based download from detail', { url });
-    startDownloadWithProgress(url, 'detail');
+async function downloadFromDetail(url, artist, title) {
+    devLog('Starting task-based download from detail', { url, artist, title });
+    startDownloadWithProgress(url, 'detail', null, { artist: artist || '', title: title || '' });
 }
 
 // ===== Modals =====
@@ -692,62 +693,14 @@ function setupFileCardDelegation() {
 }
 
 function playFile(filename) {
-    if (state.currentAudio) {
-        state.currentAudio.pause();
-        state.currentAudio.remove();
-        state.currentAudio = null;
-    }
-    devLog('Playing local file', { filename });
+    // Parse a search query from the filename: strip extension and any random hex suffix
+    const rawName = filename.split('/').pop() || filename;
+    let query = rawName.replace(/\.[^.]+$/, '');  // remove file extension
+    query = query.replace(/_\d{6,}$/, '');         // strip _196980 style hex suffix from old files
 
-    // Show player bar
-    const playerBar = document.getElementById('player-bar');
-    playerBar.style.display = '';
-
-    const displayName = filename.split('/').pop() || filename;
-    document.getElementById('player-track-name').textContent = displayName;
-    document.getElementById('player-artist-name').textContent = 'Downloaded file';
-    document.getElementById('player-time-current').textContent = '0:00';
-    document.getElementById('player-progress-fill').style.width = '0%';
-    document.getElementById('player-cover-img').style.display = 'none';
-
-    const playBtn = document.getElementById('ctrl-play');
-    playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
-
-    const audio = new Audio(`/files/stream?filename=${encodeURIComponent(filename)}`);
-    state.currentAudio = audio;
-    state.playerTrack = { name: displayName, artists: 'Downloaded file', cover: null };
-
-    audio.addEventListener('loadedmetadata', () => {
-        document.getElementById('player-time-total').textContent = formatTime(audio.duration || 0);
-    });
-
-    audio.addEventListener('play', () => {
-        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/></svg>';
-    });
-
-    audio.addEventListener('pause', () => {
-        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
-    });
-
-    audio.addEventListener('timeupdate', () => {
-        if (audio.duration) {
-            const pct = (audio.currentTime / audio.duration) * 100;
-            document.getElementById('player-progress-fill').style.width = `${pct}%`;
-            document.getElementById('player-time-current').textContent = formatTime(audio.currentTime);
-        }
-    });
-
-    audio.addEventListener('ended', () => {
-        playBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>';
-    });
-
-    audio.addEventListener('error', () => {
-        showToast('Failed to play file', 'error');
-        devLog('Playback error', { filename });
-    });
-
-    audio.play().catch(() => showToast('Playback blocked by browser. Click play to try again.', 'error'));
-    showToast(`Playing: ${displayName}`, 'info');
+    // Use yt-dlp streaming for all playback (unified streaming architecture)
+    devLog('Playing via yt-dlp stream', { filename, query });
+    streamTrack(query, query, 'Local file', null);
 }
 
 function downloadFile(filename) {
@@ -1007,41 +960,58 @@ const PROGRESS_PCT_MAP = {
 
 let _activePollTimers = {}; // taskId → interval timer
 
-async function startDownloadWithProgress(url, source) {
-    // Hide previous status, show progress bar
-    const isDetail = source === 'detail';
-    const progressEl = document.getElementById(isDetail ? 'detail-download-progress' : 'download-progress');
-    const stageEl = document.getElementById(isDetail ? 'detail-progress-stage' : 'progress-stage');
-    const pctEl = document.getElementById(isDetail ? 'detail-progress-pct' : 'progress-pct');
-    const fillEl = document.getElementById(isDetail ? 'detail-progress-fill-dl' : 'progress-fill-dl');
+async function startDownloadWithProgress(url, source, cardEl, extraFields = {}) {
+    // Determine which progress bar to use
+    let progressEl, stageEl, pctEl, fillEl, btn, isInline = false;
 
-    // Hide status msg if on tab
-    if (!isDetail) {
+    if (source === 'detail') {
+        progressEl = document.getElementById('detail-download-progress');
+        stageEl = document.getElementById('detail-progress-stage');
+        pctEl = document.getElementById('detail-progress-pct');
+        fillEl = document.getElementById('detail-progress-fill-dl');
+        btn = document.getElementById('btn-detail-download');
+    } else if (source === 'inline' && cardEl) {
+        // Create an inline progress bar inside the card
+        isInline = true;
+        const existing = cardEl.querySelector('.card-progress');
+        if (existing) existing.remove();
+        progressEl = document.createElement('div');
+        progressEl.className = 'card-progress';
+        progressEl.innerHTML = `
+            <div class="card-progress-track">
+                <div class="card-progress-fill"></div>
+            </div>
+            <div class="card-progress-text">Queued...</div>
+        `;
+        cardEl.appendChild(progressEl);
+        stageEl = progressEl.querySelector('.card-progress-text');
+        fillEl = progressEl.querySelector('.card-progress-fill');
+        pctEl = null;
+        btn = cardEl.querySelector('.card-dl');
+    } else {
+        // Tab download
+        progressEl = document.getElementById('download-progress');
+        stageEl = document.getElementById('progress-stage');
+        pctEl = document.getElementById('progress-pct');
+        fillEl = document.getElementById('progress-fill-dl');
+        btn = document.getElementById('btn-download');
         document.getElementById('download-status').classList.add('hidden');
+        progressEl.classList.remove('hidden');
     }
 
-    // Reset and show progress bar
-    fillEl.className = 'progress-fill-dl';
-    fillEl.style.width = '0%';
-    pctEl.textContent = '0%';
-    stageEl.textContent = 'Starting...';
-    progressEl.querySelectorAll('.progress-step').forEach(s => s.className = 'progress-step');
-    progressEl.classList.remove('hidden');
-
-    // Disable download button
-    const btn = document.getElementById(isDetail ? 'btn-detail-download' : 'btn-download');
-    if (btn) {
+    // Disable download button (if not inline — inline already disabled by caller)
+    if (btn && !isInline) {
         btn.disabled = true;
         btn.style.opacity = '0.6';
     }
 
-    showToast('Download queued...', 'info');
+    if (!isInline) showToast('Download queued...', 'info');
 
     try {
         const res = await fetch('/download/task', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, quality: state.defaultQuality, downloader: state.defaultDownloader }),
+            body: JSON.stringify({ url, quality: state.defaultQuality, downloader: state.defaultDownloader, ...extraFields }),
         });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: 'Failed to start download' }));
@@ -1063,16 +1033,17 @@ async function startDownloadWithProgress(url, source) {
         }));
 
         // Start polling
-        pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn);
+        pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl);
     } catch (e) {
-        showToast('Download failed to start', 'error');
+        if (!isInline) showToast('Download failed to start', 'error');
         devLog('Download task start error', { error: e.message });
-        progressEl.classList.add('hidden');
+        if (isInline && progressEl) progressEl.remove();
+        else progressEl.classList.add('hidden');
         if (btn) { btn.disabled = false; btn.style.opacity = ''; }
     }
 }
 
-function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn) {
+function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl) {
     // Clear any previous timer for this task
     if (_activePollTimers[taskId]) {
         clearInterval(_activePollTimers[taskId]);
@@ -1088,7 +1059,17 @@ function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source
                 return;
             }
             const task = await res.json();
-            updateProgressBar(task, progressEl, fillEl, pctEl, stageEl);
+
+            if (isInline) {
+                // Simple inline progress update
+                const pct = PROGRESS_PCT_MAP[task.status] || 0;
+                fillEl.style.width = `${pct}%`;
+                stageEl.textContent = task.stage || task.status;
+                if (task.status === 'complete') fillEl.style.background = '#22c55e';
+                if (task.status === 'failed') fillEl.style.background = '#ef4444';
+            } else {
+                updateProgressBar(task, progressEl, fillEl, pctEl, stageEl);
+            }
 
             if (task.status === 'complete') {
                 // Stop polling
@@ -1098,6 +1079,14 @@ function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source
 
                 // Enable button
                 if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+
+                // For inline: show checkmark and remove after delay
+                if (isInline && progressEl) {
+                    stageEl.textContent = '✅ Ready!';
+                    fillEl.style.width = '100%';
+                    fillEl.style.background = '#22c55e';
+                    setTimeout(() => progressEl.remove(), 3000);
+                }
 
                 // Trigger file download
                 if (task.filename) {
@@ -1131,16 +1120,16 @@ function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source
                     // Add file to this browser's localStorage list, then refresh the tab
                     trackDownloadedFile(task.filename);
 
-                    // Show player bar with the downloaded file after download
-                    setTimeout(() => {
-                        progressEl.classList.add('hidden');
-                        if (source === 'tab') {
-                            document.getElementById('download-url').value = '';
-                        }
-                        renderLocalFiles();
-                        // Show player bar and play the downloaded file
-                        playFile(task.filename);
-                    }, 2000);
+                    // Don't auto-play, just clean up UI
+                    if (!isInline) {
+                        setTimeout(() => {
+                            progressEl.classList.add('hidden');
+                            if (source === 'tab') {
+                                document.getElementById('download-url').value = '';
+                            }
+                            renderLocalFiles();
+                        }, 2000);
+                    }
                 }
             } else if (task.status === 'failed') {
                 // Stop polling
@@ -1149,13 +1138,17 @@ function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source
                 localStorage.removeItem('glitchi-active-download');
 
                 if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-                showToast(task.error || 'Download failed', 'error');
+                if (!isInline) showToast(task.error || 'Download failed', 'error');
                 devLog('Download failed', { taskId, error: task.error });
 
                 // Keep progress visible showing failure for a few seconds
-                setTimeout(() => {
-                    progressEl.classList.add('hidden');
-                }, 4000);
+                if (isInline && progressEl) {
+                    stageEl.textContent = '❌ Failed';
+                    fillEl.style.background = '#ef4444';
+                    setTimeout(() => progressEl.remove(), 4000);
+                } else {
+                    setTimeout(() => progressEl.classList.add('hidden'), 4000);
+                }
             }
         } catch (e) {
             devLog('Progress poll error', { taskId, error: e.message });
@@ -1219,6 +1212,14 @@ function resumeActiveDownloads() {
         }
 
         const isDetail = info.source === 'detail';
+        const isInline = info.source === 'inline';
+
+        // Inline downloads can't resume — card element is gone after page refresh
+        if (isInline) {
+            localStorage.removeItem('glitchi-active-download');
+            return;
+        }
+
         const progressEl = document.getElementById(isDetail ? 'detail-download-progress' : 'download-progress');
         const stageEl = document.getElementById(isDetail ? 'detail-progress-stage' : 'progress-stage');
         const pctEl = document.getElementById(isDetail ? 'detail-progress-pct' : 'progress-pct');
@@ -1376,13 +1377,15 @@ function openPlaylistView(playlist) {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const row = btn.closest('.track-row');
-                if (row.dataset.url) downloadFromDetail(row.dataset.url);
+                if (row.dataset.url) downloadFromDetail(row.dataset.url, row.dataset.artist, row.dataset.name);
             });
         });
         listEl.querySelectorAll('.track-row').forEach(row => {
+            const plArtist = row.dataset.artist;
+            const plName = row.dataset.name;
             row.addEventListener('click', (e) => {
                 if (e.target.closest('.track-remove') || e.target.closest('.track-dl')) return;
-                if (row.dataset.url) downloadFromDetail(row.dataset.url);
+                if (row.dataset.url) downloadFromDetail(row.dataset.url, plArtist, plName);
             });
         });
     }

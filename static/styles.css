@@ -612,6 +612,32 @@ body {
 .card-subtitle { font-size: 13px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
 .card-meta { font-size: 11px; color: var(--text-tertiary); margin-top: 6px; }
 
+/* ── Inline card progress bar (download from search results) ──────── */
+.card-progress {
+    margin-top: 8px;
+    padding: 4px 0;
+}
+.card-progress-track {
+    width: 100%;
+    height: 4px;
+    background: var(--bg-input, #2a2a2a);
+    border-radius: 2px;
+    overflow: hidden;
+}
+.card-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent, #1db954);
+    border-radius: 2px;
+    transition: width 0.4s ease, background 0.3s ease;
+}
+.card-progress-text {
+    font-size: 10px;
+    color: var(--text-tertiary, #888);
+    margin-top: 3px;
+    text-align: center;
+}
+
 .btn-accent {
     display: flex; align-items: center; justify-content: center; gap: 6px;
     padding: 10px 18px; border: none; border-radius: var(--radius-xl);

@@ -1,15 +1,6 @@
 from spotapi import Song, Artist
 from app.utils.logger import logger
 
-# Try to import Playlist class - spotapi API differs between versions
-try:
-    from spotapi import Playlist  # newer versions
-except ImportError:
-    try:
-        from spotapi.playlist import PublicPlaylist as Playlist  # older versions
-    except ImportError:
-        Playlist = None  # playlist search unavailable
-
 
 # ── Album tracks lookup ────────────────────────────────────────────
 
@@ -64,32 +55,63 @@ def get_track_preview_url(track_id: str) -> str | None:
 def get_album_tracks(album_id: str) -> list[dict]:
     """Fetch all tracks for a given album ID via SpotAPI."""
     logger.info(f"Fetching album tracks for: {album_id}")
-    song = Song()
-    # Use query_songs with the album ID - SpotAPI will resolve it
-    album_data = song.query_songs(f"album:{album_id}", limit=50)
-    if not album_data or not isinstance(album_data, dict):
-        logger.error(f"SpotAPI returned invalid data for album {album_id}")
+    try:
+        return _get_album_tracks_impl(album_id)
+    except Exception as e:
+        logger.error(f"get_album_tracks crash for {album_id}: {type(e).__name__}: {e}")
         return []
-    search_v2 = album_data.get("data", {}).get("searchV2", {})
-    
+
+
+def _get_album_tracks_impl(album_id: str) -> list[dict]:
+    """Search for tracks belonging to a specific album via SpotAPI query_songs."""
+    try:
+        song = Song()
+        data = song.query_songs(album_id, limit=50)
+    except Exception as e:
+        logger.error(f"query_songs failed for album {album_id}: {type(e).__name__}: {e}")
+        return []
+
+    if not data or not isinstance(data, dict):
+        return []
+
+    search_v2 = data.get("data", {}).get("searchV2", {})
+    if not isinstance(search_v2, dict):
+        return []
+
     # Look for tracks matching this album
-    track_items_raw = search_v2.get("tracksV2", {}).get("items", [])
+    track_items_raw = _safe_dict(_safe_dict(search_v2, "tracksV2", {}), "items", [])
+    if not isinstance(track_items_raw, list):
+        return []
     tracks = []
     for wrapper in track_items_raw:
+        if not isinstance(wrapper, dict):
+            continue
         item = wrapper.get("item", {})
+        if not isinstance(item, dict):
+            continue
         data = item.get("data", {})
+        if not isinstance(data, dict):
+            continue
         uri = data.get("uri", "")
         album_of_track = data.get("albumOfTrack", {})
+        if not isinstance(album_of_track, dict):
+            continue
         # Filter by album ID
         album_uri = album_of_track.get("uri", "")
         if album_id not in album_uri:
             continue
-        artists_items = data.get("artists", {}).get("items", [])
+        artists_items = _safe_dict(_safe_dict(data, "artists", {}), "items", [])
+        if not isinstance(artists_items, list):
+            artists_items = []
         artist_names = ", ".join(
-            a.get("profile", {}).get("name", "")
-            for a in artists_items
+            _safe_dict(_safe_dict(a, "profile", {}), "name", "")
+            for a in artists_items if isinstance(a, dict)
         )
-        cover_sources = album_of_track.get("coverArt", {}).get("sources", [])
+        cover_sources = _safe_dict(_safe_dict(album_of_track, "coverArt", {}), "sources", [])
+        if not isinstance(cover_sources, list):
+            cover_sources = []
+        duration_data = data.get("duration", {})
+        duration_ms = duration_data.get("totalMilliseconds", 0) if isinstance(duration_data, dict) else 0
         tracks.append({
             "name": data.get("name", ""),
             "id": _uri_to_id(uri),
@@ -97,7 +119,7 @@ def get_album_tracks(album_id: str) -> list[dict]:
             "artists": artist_names,
             "album": album_of_track.get("name", ""),
             "album_image_url": _best_image(cover_sources),
-            "duration_ms": data.get("duration", {}).get("totalMilliseconds", 0),
+            "duration_ms": duration_ms,
             "url": _uri_to_url(uri),
         })
     return tracks
@@ -126,48 +148,77 @@ def _best_image(sources: list) -> str:
     """Pick the best image URL from a list of sources."""
     if not sources:
         return ""
-    best = max(sources, key=lambda s: s.get("width", 0) * s.get("height", 0))
+    valid = [s for s in sources if isinstance(s, dict)]
+    if not valid:
+        return ""
+    best = max(valid, key=lambda s: s.get("width", 0) * s.get("height", 0))
     return best.get("url", "")
 
 
 def search_playlists_spotify(q: str, limit: int = 20) -> list[dict]:
-    """Search for playlists using SpotAPI."""
-    if Playlist is None:
-        logger.warning(f"Playlist search unavailable - spotapi version doesn't support it")
-        return []
+    """Search for playlists using Song.query_songs (searchV2.playlists).
+
+    The newer spotapi PublicPlaylist API requires a playlist URL/ID in its
+    constructor and doesn't support free-text searching.  We extract playlist
+    results from Song.query_songs instead.
+    """
     logger.info(f"SpotAPI playlist search: q='{q}' limit={limit}")
     try:
-        playlist = Playlist()
-        results = playlist.search(q, limit=limit)
-        if not results or not isinstance(results, dict):
-            logger.warning(f"SpotAPI playlist search returned no results for q='{q}'")
-            return []
-
-        # The response structure: data.searchV2.playlists.items[]
-        search_v2 = results.get("data", {}).get("searchV2", {})
-        playlist_items_raw = search_v2.get("playlists", {}).get("items", [])
-
-        items = []
-        for wrapper in playlist_items_raw:
-            data = wrapper.get("data", {})
-            uri = data.get("uri", "")
-            owner_data = data.get("owner", {})
-            owner_name = owner_data.get("name", "") if isinstance(owner_data, dict) else ""
-            cover_sources = data.get("coverArt", {}).get("sources", [])
-            items.append({
-                "name": data.get("name", ""),
-                "id": _uri_to_id(uri),
-                "description": data.get("description", "") or "",
-                "image_url": _best_image(cover_sources),
-                "url": _uri_to_url(uri),
-                "tracks_count": data.get("totalTracks", 0),
-                "owner": owner_name,
-            })
-        logger.info(f"Found {len(items)} playlists for q='{q}'")
-        return items
+        song = Song()
+        results = song.query_songs(q, limit=limit)
     except Exception as e:
-        logger.error(f"Playlist search error for q='{q}': {type(e).__name__}: {e}")
+        logger.error(f"SpotAPI playlist search crash for q='{q}': {type(e).__name__}: {e}")
         return []
+
+    if not results or not isinstance(results, dict):
+        logger.warning(f"SpotAPI playlist search returned no results for q='{q}'")
+        return []
+
+    search_v2 = _safe_dict(_safe_dict(results, "data", {}), "searchV2", {})
+    if not isinstance(search_v2, dict):
+        return []
+
+    items = _parse_playlist_items(search_v2)
+    logger.info(f"Found {len(items)} playlists for q='{q}'")
+    return items
+
+
+def _parse_playlist_items(search_v2: dict) -> list[dict]:
+    """Extract playlist items from a searchV2 response."""
+    playlist_items_raw = _safe_dict(_safe_dict(search_v2, "playlists", {}), "items", [])
+    if not isinstance(playlist_items_raw, list):
+        return []
+    items = []
+    for wrapper in playlist_items_raw:
+        if not isinstance(wrapper, dict):
+            continue
+        data = wrapper.get("data", {})
+        if not isinstance(data, dict):
+            continue
+        uri = data.get("uri", "")
+        owner_data = data.get("owner", {})
+        owner_name = owner_data.get("name", "") if isinstance(owner_data, dict) else ""
+        cover_sources = _safe_dict(_safe_dict(data, "coverArt", {}), "sources", [])
+        if not isinstance(cover_sources, list):
+            cover_sources = []
+        items.append({
+            "name": data.get("name", ""),
+            "id": _uri_to_id(uri),
+            "description": data.get("description", "") or "",
+            "image_url": _best_image(cover_sources),
+            "url": _uri_to_url(uri),
+            "tracks_count": data.get("totalTracks", 0),
+            "owner": owner_name,
+        })
+    return items
+
+
+def _safe_dict(d, key, default=None):
+    """Get key from dict, returning default if value is None or missing."""
+    if not isinstance(d, dict):
+        return default
+    v = d.get(key, default)
+    return v if v is not None else default
 
 
 def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
@@ -177,13 +228,25 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     """
     logger.info(f"SpotAPI search: q='{q}' type={search_type} limit={limit}")
 
+    try:
+        return _search_spotify_impl(q, search_type, limit, market)
+    except Exception as e:
+        logger.error(f"search_spotify crash for q='{q}': {type(e).__name__}: {e}")
+        return {}
+
+
+def _search_spotify_impl(q: str, search_type: str, limit: int, market: str) -> dict:
     types_requested = set(t.strip() for t in search_type.split(","))
     raw: dict[str, list] = {}
 
-    # Track & Album search via Song.query_songs (returns both tracksV2 + albumsV2)
-    if "track" in types_requested or "album" in types_requested:
-        song = Song()
+    # Fetch searchV2 once for tracks, albums, AND playlists
+    # (Song.query_songs returns tracksV2, albumsV2, and playlists)
+    need_query_songs = types_requested & {"track", "album", "playlist"}
+    search_v2: dict = {}
+
+    if need_query_songs:
         try:
+            song = Song()
             song_data = song.query_songs(q, limit=limit)
         except Exception as e:
             logger.error(f"SpotAPI query_songs exception for q='{q}': {type(e).__name__}: {e}")
@@ -192,23 +255,39 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
             logger.error(f"SpotAPI query_songs returned invalid data for q='{q}'")
             song_data = {}
         search_v2 = song_data.get("data", {}).get("searchV2", {})
+        if not isinstance(search_v2, dict):
+            search_v2 = {}
 
         if "track" in types_requested:
-            track_items_raw = (
-                search_v2.get("tracksV2", {}).get("items", [])
-            )
+            track_items_raw = search_v2.get("tracksV2", {}).get("items", [])
+            if not isinstance(track_items_raw, list):
+                track_items_raw = []
             track_items = []
             for wrapper in track_items_raw:
+                if not isinstance(wrapper, dict):
+                    continue
                 item = wrapper.get("item", {})
+                if not isinstance(item, dict):
+                    continue
                 data = item.get("data", {})
+                if not isinstance(data, dict):
+                    continue
                 uri = data.get("uri", "")
                 album_data = data.get("albumOfTrack", {})
-                artists_items = data.get("artists", {}).get("items", [])
+                if not isinstance(album_data, dict):
+                    album_data = {}
+                artists_items = _safe_dict(data, "artists", {}).get("items", [])
+                if not isinstance(artists_items, list):
+                    artists_items = []
                 artist_names = ", ".join(
-                    a.get("profile", {}).get("name", "")
-                    for a in artists_items
+                    _safe_dict(_safe_dict(a, "profile", {}), "name", "")
+                    for a in artists_items if isinstance(a, dict)
                 )
-                cover_sources = album_data.get("coverArt", {}).get("sources", [])
+                cover_sources = _safe_dict(album_data, "coverArt", {}).get("sources", [])
+                if not isinstance(cover_sources, list):
+                    cover_sources = []
+                duration_data = data.get("duration", {})
+                duration_ms = duration_data.get("totalMilliseconds", 0) if isinstance(duration_data, dict) else 0
                 track_items.append({
                     "name": data.get("name", ""),
                     "id": _uri_to_id(uri),
@@ -216,32 +295,42 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
                     "artists": artist_names,
                     "album": album_data.get("name", ""),
                     "album_image_url": _best_image(cover_sources),
-                    "duration_ms": data.get("duration", {}).get("totalMilliseconds", 0),
+                    "duration_ms": duration_ms,
                     "preview_url": None,
                     "url": _uri_to_url(uri),
                 })
             raw["tracks"] = {"items": track_items}
 
         if "album" in types_requested:
-            album_items_raw = (
-                search_v2.get("albumsV2", {}).get("items", [])
-            )
+            album_items_raw = search_v2.get("albumsV2", {}).get("items", [])
+            if not isinstance(album_items_raw, list):
+                album_items_raw = []
             album_items = []
             for wrapper in album_items_raw:
+                if not isinstance(wrapper, dict):
+                    continue
                 data = wrapper.get("data", {})
+                if not isinstance(data, dict):
+                    continue
                 uri = data.get("uri", "")
-                artists_items = data.get("artists", {}).get("items", [])
+                artists_items = _safe_dict(data, "artists", {}).get("items", [])
+                if not isinstance(artists_items, list):
+                    artists_items = []
                 artist_names = ", ".join(
-                    a.get("profile", {}).get("name", "")
-                    for a in artists_items
+                    _safe_dict(_safe_dict(a, "profile", {}), "name", "")
+                    for a in artists_items if isinstance(a, dict)
                 )
-                cover_sources = data.get("coverArt", {}).get("sources", [])
+                cover_sources = _safe_dict(data, "coverArt", {}).get("sources", [])
+                if not isinstance(cover_sources, list):
+                    cover_sources = []
+                date_data = _safe_dict(data, "date", {})
+                release_year = str(date_data.get("year", "")) if isinstance(date_data, dict) else ""
                 album_items.append({
                     "name": data.get("name", ""),
                     "id": _uri_to_id(uri),
                     "uri": uri,
                     "artists": artist_names,
-                    "release_date": str(data.get("date", {}).get("year", "")),
+                    "release_date": release_year,
                     "total_tracks": 0,
                     "image_url": _best_image(cover_sources),
                     "url": _uri_to_url(uri),
@@ -250,8 +339,8 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
 
     # Artist search via Artist.query_artists
     if "artist" in types_requested:
-        artist = Artist()
         try:
+            artist = Artist()
             artist_data = artist.query_artists(q, limit=limit)
         except Exception as e:
             logger.error(f"SpotAPI query_artists exception for q='{q}': {type(e).__name__}: {e}")
@@ -260,19 +349,29 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
             logger.error(f"SpotAPI query_artists returned invalid data for q='{q}'")
             artist_data = {}
         search_v2 = artist_data.get("data", {}).get("searchV2", {})
+        if not isinstance(search_v2, dict):
+            search_v2 = {}
         artist_items_raw = search_v2.get("artists", {}).get("items", [])
+        if not isinstance(artist_items_raw, list):
+            artist_items_raw = []
 
         artist_items = []
         for wrapper in artist_items_raw:
+            if not isinstance(wrapper, dict):
+                continue
             data = wrapper.get("data", {})
+            if not isinstance(data, dict):
+                continue
             uri = data.get("uri", "")
-            avatar_sources = (
-                data.get("visuals", {})
-                .get("avatarImage", {})
-                .get("sources", [])
-            )
+            visuals = _safe_dict(data, "visuals", {})
+            avatar_image = _safe_dict(visuals, "avatarImage", {})
+            avatar_sources = avatar_image.get("sources", []) if isinstance(avatar_image, dict) else []
+            if not isinstance(avatar_sources, list):
+                avatar_sources = []
+            profile = _safe_dict(data, "profile", {})
+            profile_name = profile.get("name", "") if isinstance(profile, dict) else ""
             artist_items.append({
-                "name": data.get("profile", {}).get("name", ""),
+                "name": profile_name,
                 "id": _uri_to_id(uri),
                 "uri": uri,
                 "genres": "",
@@ -282,9 +381,12 @@ def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
             })
         raw["artists"] = {"items": artist_items}
 
-    # Playlist search via Playlist.search
+    # Playlist search — if query_songs was already called, extract from search_v2;
+    # otherwise do a dedicated search (covers edge case where only type=playlist)
     if "playlist" in types_requested:
-        playlist_items = search_playlists_spotify(q, limit=limit)
+        playlist_items = _parse_playlist_items(search_v2) if search_v2 else []
+        if not playlist_items:
+            playlist_items = search_playlists_spotify(q, limit=limit)
         if playlist_items:
             raw["playlists"] = {"items": playlist_items}
 
