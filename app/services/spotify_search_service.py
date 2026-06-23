@@ -221,6 +221,74 @@ def _safe_dict(d, key, default=None):
     return v if v is not None else default
 
 
+# ── Browse / Discover ──────────────────────────────────────────────
+
+# Genre & mood categories for the Song Browser
+BROWSE_CATEGORIES = [
+    {"id": "pop", "name": "Pop", "color": "#ec407a"},
+    {"id": "rock", "name": "Rock", "color": "#ef5350"},
+    {"id": "hip-hop", "name": "Hip-Hop", "color": "#ff9800"},
+    {"id": "electronic", "name": "Electronic", "color": "#00bcd4"},
+    {"id": "rnb", "name": "R&B", "color": "#9c27b0"},
+    {"id": "jazz", "name": "Jazz", "color": "#8d6e63"},
+    {"id": "classical", "name": "Classical", "color": "#78909c"},
+    {"id": "country", "name": "Country", "color": "#a1887f"},
+    {"id": "latin", "name": "Latin", "color": "#f44336"},
+    {"id": "k-pop", "name": "K-Pop", "color": "#e91e63"},
+    {"id": "indie", "name": "Indie", "color": "#66bb6a"},
+    {"id": "metal", "name": "Metal", "color": "#424242"},
+    {"id": "reggae", "name": "Reggae", "color": "#2e7d32"},
+    {"id": "blues", "name": "Blues", "color": "#1565c0"},
+    {"id": "folk", "name": "Folk", "color": "#795548"},
+    {"id": "chill", "name": "Chill", "color": "#4fc3f7"},
+    {"id": "workout", "name": "Workout", "color": "#ff5722"},
+    {"id": "focus", "name": "Focus", "color": "#5c6bc0"},
+    {"id": "party", "name": "Party", "color": "#ff4081"},
+    {"id": "sleep", "name": "Sleep", "color": "#3f51b5"},
+    {"id": "romance", "name": "Romance", "color": "#e91e63"},
+    {"id": "gaming", "name": "Gaming", "color": "#76ff03"},
+    {"id": "travel", "name": "Travel", "color": "#00acc1"},
+    {"id": "retro", "name": "Retro", "color": "#ff6f00"},
+]
+
+
+def browse_by_category(category_id: str, limit: int = 20) -> dict:
+    """Get playlists and tracks for a genre/mood category."""
+    logger.info(f"Browse category: '{category_id}' limit={limit}")
+    cat = next((c for c in BROWSE_CATEGORIES if c["id"] == category_id), None)
+    search_term = cat["name"] if cat else category_id
+    # Search for playlists + tracks in this category
+    return search_spotify(
+        q=f"{search_term} mix",
+        search_type="playlist,track",
+        limit=limit,
+        market="US",
+    )
+
+
+def get_new_releases(limit: int = 20) -> dict:
+    """Get new album releases."""
+    logger.info(f"New releases: limit={limit}")
+    # Search for recent albums
+    return search_spotify(
+        q="new releases",
+        search_type="album,track",
+        limit=limit,
+        market="US",
+    )
+
+
+def get_featured_playlists(limit: int = 20) -> dict:
+    """Get featured/curated playlists."""
+    logger.info(f"Featured playlists: limit={limit}")
+    return search_spotify(
+        q="top playlists",
+        search_type="playlist,track",
+        limit=limit,
+        market="US",
+    )
+
+
 def search_spotify(q: str, search_type: str, limit: int, market: str) -> dict:
     """
     Search Spotify via SpotAPI (no credentials needed).

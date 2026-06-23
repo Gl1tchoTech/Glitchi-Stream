@@ -1,0 +1,185 @@
+"""Browse API — discover music by category, genre, mood, and trending.
+All data sourced from Spotify via SpotAPI (no credentials needed)."""
+
+from fastapi import APIRouter, HTTPException, Query
+from app.models.responses import SearchResults, Track, Album, Playlist
+from app.services.spotify_search_service import (
+    search_spotify,
+    browse_by_category,
+    get_new_releases,
+    get_featured_playlists,
+    BROWSE_CATEGORIES,
+)
+
+router = APIRouter(prefix="/browse", tags=["Browse"])
+
+
+@router.get("/categories")
+async def categories():
+    """Return all available browse categories (genres, moods, scenes)."""
+    return {"categories": BROWSE_CATEGORIES}
+
+
+@router.get("/category/{category_id}", response_model=SearchResults)
+async def category_detail(
+    category_id: str,
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Get playlists and tracks for a browse category (genre/mood)."""
+    try:
+        raw = browse_by_category(category_id, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Browse API error: {e}")
+
+    results = SearchResults(query=category_id)
+
+    if "playlists" in raw:
+        for pl in raw["playlists"].get("items", []):
+            results.playlists.append(
+                Playlist(
+                    name=pl.get("name", ""),
+                    id=pl.get("id", ""),
+                    description=pl.get("description", ""),
+                    image_url=pl.get("image_url", ""),
+                    url=pl.get("url", ""),
+                    tracks_count=pl.get("tracks_count", 0),
+                    owner=pl.get("owner", ""),
+                )
+            )
+
+    if "tracks" in raw:
+        for t in raw["tracks"].get("items", []):
+            results.tracks.append(
+                Track(
+                    name=t.get("name", ""),
+                    id=t.get("id", ""),
+                    artists=t.get("artists", ""),
+                    album=t.get("album", ""),
+                    album_image_url=t.get("album_image_url", ""),
+                    duration_ms=t.get("duration_ms", 0),
+                    preview_url=t.get("preview_url"),
+                    url=t.get("url", ""),
+                )
+            )
+
+    return results
+
+
+@router.get("/new-releases", response_model=SearchResults)
+async def new_releases(
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Get new album releases."""
+    try:
+        raw = get_new_releases(limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"New releases API error: {e}")
+
+    results = SearchResults(query="new-releases")
+
+    if "albums" in raw:
+        for a in raw["albums"].get("items", []):
+            results.albums.append(
+                Album(
+                    name=a.get("name", ""),
+                    id=a.get("id", ""),
+                    artists=a.get("artists", ""),
+                    release_date=a.get("release_date", ""),
+                    total_tracks=a.get("total_tracks", 0),
+                    image_url=a.get("image_url", ""),
+                    url=a.get("url", ""),
+                )
+            )
+
+    if "tracks" in raw:
+        for t in raw["tracks"].get("items", []):
+            results.tracks.append(
+                Track(
+                    name=t.get("name", ""),
+                    id=t.get("id", ""),
+                    artists=t.get("artists", ""),
+                    album=t.get("album", ""),
+                    album_image_url=t.get("album_image_url", ""),
+                    duration_ms=t.get("duration_ms", 0),
+                    preview_url=t.get("preview_url"),
+                    url=t.get("url", ""),
+                )
+            )
+
+    return results
+
+
+@router.get("/featured", response_model=SearchResults)
+async def featured(
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Get featured/curated playlists."""
+    try:
+        raw = get_featured_playlists(limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Featured API error: {e}")
+
+    results = SearchResults(query="featured")
+
+    if "playlists" in raw:
+        for pl in raw["playlists"].get("items", []):
+            results.playlists.append(
+                Playlist(
+                    name=pl.get("name", ""),
+                    id=pl.get("id", ""),
+                    description=pl.get("description", ""),
+                    image_url=pl.get("image_url", ""),
+                    url=pl.get("url", ""),
+                    tracks_count=pl.get("tracks_count", 0),
+                    owner=pl.get("owner", ""),
+                )
+            )
+
+    if "tracks" in raw:
+        for t in raw["tracks"].get("items", []):
+            results.tracks.append(
+                Track(
+                    name=t.get("name", ""),
+                    id=t.get("id", ""),
+                    artists=t.get("artists", ""),
+                    album=t.get("album", ""),
+                    album_image_url=t.get("album_image_url", ""),
+                    duration_ms=t.get("duration_ms", 0),
+                    preview_url=t.get("preview_url"),
+                    url=t.get("url", ""),
+                )
+            )
+
+    return results
+
+
+@router.get("/trending", response_model=SearchResults)
+async def trending(
+    limit: int = Query(20, ge=1, le=50),
+):
+    """Get trending/popular tracks."""
+    try:
+        raw = search_spotify(
+            q="top hits", search_type="track", limit=limit, market="US"
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Trending API error: {e}")
+
+    results = SearchResults(query="trending")
+
+    if "tracks" in raw:
+        for t in raw["tracks"].get("items", []):
+            results.tracks.append(
+                Track(
+                    name=t.get("name", ""),
+                    id=t.get("id", ""),
+                    artists=t.get("artists", ""),
+                    album=t.get("album", ""),
+                    album_image_url=t.get("album_image_url", ""),
+                    duration_ms=t.get("duration_ms", 0),
+                    preview_url=t.get("preview_url"),
+                    url=t.get("url", ""),
+                )
+            )
+
+    return results
