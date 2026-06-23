@@ -576,11 +576,15 @@ async def _process_metadata_for_file(
     filepath: str, url: str,
     on_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
     metadata: Optional[dict] = None,
+    artist_hint: Optional[str] = None,
+    title_hint: Optional[str] = None,
 ) -> str:
     """Fetch metadata, inject tags, rename file. Returns relative filename.
 
     If *metadata* is provided (pre-enriched by the caller), skips the internal
-    ``fetch_metadata()`` call.
+    ``fetch_metadata()`` call.  *artist_hint* / *title_hint* fill in missing
+    artist/title after the fetch — used when SpotAPI returns empty artist but
+    the frontend already has it from search results.
     """
     rel = os.path.relpath(filepath, settings.DOWNLOAD_DIR)
 
@@ -588,6 +592,16 @@ async def _process_metadata_for_file(
         if on_progress:
             await on_progress("processing", "Fetching track metadata...")
         metadata = await fetch_metadata(url)
+
+    # Enrich with frontend-provided artist/title when SpotAPI returned empty.
+    # Build a minimal dict from hints even if SpotAPI failed entirely.
+    if artist_hint or title_hint:
+        if metadata is None:
+            metadata = {}
+        if artist_hint and not metadata.get("artist"):
+            metadata["artist"] = artist_hint
+        if title_hint and not metadata.get("title"):
+            metadata["title"] = title_hint
 
     if metadata and metadata.get("title"):
         if on_progress:
@@ -755,7 +769,10 @@ async def download_spotiflac(
             return None
 
         abs_path = os.path.join(settings.DOWNLOAD_DIR, rel_path)
-        final_filename = await _process_metadata_for_file(abs_path, str(req.url), on_progress)
+        final_filename = await _process_metadata_for_file(
+            abs_path, str(req.url), on_progress,
+            artist_hint=req.artist, title_hint=req.title,
+        )
 
         if on_progress:
             await on_progress("complete", final_filename)
@@ -1110,7 +1127,10 @@ SpotifyFormatter.formatTrack = _spotdl_patched_formatTrack
             return None
 
         abs_path = os.path.join(settings.DOWNLOAD_DIR, rel_path)
-        final_filename = await _process_metadata_for_file(abs_path, str(req.url), on_progress)
+        final_filename = await _process_metadata_for_file(
+            abs_path, str(req.url), on_progress,
+            artist_hint=req.artist, title_hint=req.title,
+        )
 
         if on_progress:
             await on_progress("complete", final_filename)
