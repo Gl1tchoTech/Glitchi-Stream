@@ -71,98 +71,80 @@ def is_spotdl_available() -> bool:
 async def fetch_playlist_tracks(playlist_url: str) -> list[dict]:
     """Fetch all track URLs from a Spotify playlist using SpotAPI.
 
-    Tries ``song.get_playlist()`` first; falls back to ``song.query_songs()``
-    with the playlist URL as query if the method is not available.
+    Uses ``spotapi.playlist.PublicPlaylist`` (the newer, maintained API)
+    which supports paginated track fetching via ``paginate_playlist()``.
     """
     try:
-        from spotapi import Song
+        from spotapi.playlist import PublicPlaylist
         playlist_id = extract_playlist_id(playlist_url)
         if not playlist_id:
             return []
 
         def _fetch():
-            song = Song()
-            # Try get_playlist first (may not exist on older SpotAPI versions)
-            has_playlist_method = hasattr(song, "get_playlist")
-            if has_playlist_method:
-                results = song.get_playlist(playlist_id)
-                if results and isinstance(results, dict):
-                    # Try to extract tracks from playlist data
-                    playlist_v2 = results.get("data", {}).get("playlistV2", {})
-                    if playlist_v2:
-                        items = playlist_v2.get("content", {}).get("items", [])
-                        if items:
-                            return _parse_playlist_items(items)
-                    # If playlistV2.content.items is empty, try alternative paths
-                    # e.g. data.playlist.items or directly on results
-                    logger.info(f"get_playlist returned data but no tracks found at expected path, trying alternatives")
-                    # Don't fall back to query_songs - use what we got
-                    return []
-
-            # Only fallback to query_songs if get_playlist doesn't exist
-            logger.info(f"get_playlist not available, trying query_songs fallback")
-            results = song.query_songs(playlist_url, limit=50)
-            if not results or not isinstance(results, dict):
-                return []
-            search_v2 = results.get("data", {}).get("searchV2", {})
-            items = search_v2.get("tracksV2", {}).get("items", [])
-            return _parse_search_items(items)
-
-        def _parse_playlist_items(items):
+            playlist = PublicPlaylist(playlist_id)
             tracks = []
-            for item in items:
-                track_data = item.get("itemV2", {}).get("data", {})
-                if not track_data:
-                    continue
-                t = _extract_track_data(track_data)
-                if t:
-                    tracks.append(t)
+            # paginate_playlist is a generator that yields playlistV2.content dicts,
+            # each containing an "items" list of tracks
+            try:
+                for content in playlist.paginate_playlist():
+                    if not isinstance(content, dict):
+                        continue
+                    items = content.get("items", [])
+                    if not isinstance(items, list):
+                        continue
+                    for item in items:
+                        # Items are wrapped in itemV2.data (same format as playlistV2 content)
+                        if isinstance(item, dict):
+                            track_data = item.get("itemV2", {}).get("data", {})
+                            if not track_data:
+                                track_data = item.get("data", item)
+                            if isinstance(track_data, dict):
+                                t = _extract_track_data(track_data)
+                                if t:
+                                    tracks.append(t)
+            except Exception as e:
+                logger.warning(f"paginate_playlist interrupted: {e} — returning {len(tracks)} tracks so far")
             return tracks
-
-        def _parse_search_items(items):
-            tracks = []
-            for item in items:
-                data = item.get("item", {}).get("data", {})
-                if not data:
-                    continue
-                t = _extract_track_data(data)
-                if t:
-                    tracks.append(t)
-            return tracks
-
-        def _extract_track_data(track_data):
-            track_id = track_data.get("uri", "").removeprefix("spotify:track:")
-            if not track_id:
-                track_id = track_data.get("id", "")
-            name = track_data.get("name", "")
-            artists = ", ".join(
-                a.get("profile", {}).get("name", "")
-                for a in track_data.get("artists", {}).get("items", [])
-            )
-            album_data = track_data.get("albumOfTrack", {})
-            album = album_data.get("name", "")
-            cover_sources = album_data.get("coverArt", {}).get("sources", [])
-            cover_url = ""
-            if cover_sources:
-                best = max(cover_sources, key=lambda s: s.get("width", 0) * s.get("height", 0))
-                cover_url = best.get("url", "")
-            duration_ms = track_data.get("duration", {}).get("totalMilliseconds", 0)
-            url = f"https://open.spotify.com/track/{track_id}" if track_id else ""
-            return {
-                "id": track_id,
-                "name": name,
-                "artists": artists,
-                "album": album,
-                "album_image_url": cover_url,
-                "duration_ms": duration_ms,
-                "url": url,
-            }
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, _fetch)
     except Exception as e:
         logger.error(f"Playlist fetch error: {type(e).__name__}: {e}")
         return []
+
+
+# ── Shared track-data extractor ────────────────────────────────────
+
+def _extract_track_data(track_data: dict) -> dict | None:
+    """Extract track metadata from a SpotAPI track data dict."""
+    track_id = track_data.get("uri", "").removeprefix("spotify:track:")
+    if not track_id:
+        track_id = track_data.get("id", "")
+    if not track_id:
+        return None
+    name = track_data.get("name", "")
+    artists = ", ".join(
+        a.get("profile", {}).get("name", "")
+        for a in track_data.get("artists", {}).get("items", [])
+    )
+    album_data = track_data.get("albumOfTrack", {})
+    album = album_data.get("name", "")
+    cover_sources = album_data.get("coverArt", {}).get("sources", [])
+    cover_url = ""
+    if cover_sources:
+        best = max(cover_sources, key=lambda s: s.get("width", 0) * s.get("height", 0))
+        cover_url = best.get("url", "")
+    duration_ms = track_data.get("duration", {}).get("totalMilliseconds", 0)
+    url = f"https://open.spotify.com/track/{track_id}" if track_id else ""
+    return {
+        "id": track_id,
+        "name": name,
+        "artists": artists,
+        "album": album,
+        "album_image_url": cover_url,
+        "duration_ms": duration_ms,
+        "url": url,
+    }
 
 
 def get_available_downloaders() -> list[str]:
