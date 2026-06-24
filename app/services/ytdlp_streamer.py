@@ -1,9 +1,9 @@
 """yt-dlp Audio Streamer — streams songs directly, zero disk I/O.
 
-Uses ``anyio.open_process`` (instead of ``asyncio.create_subprocess_exec``)
-to avoid Windows event-loop incompatibility with uvicorn's SelectorEventLoop.
-yt-dlp handles format selection and ensures the ``moov`` atom is at the start
-so the browser can play *immediately*.  Nothing is written to disk.
+Uses yt-dlp's Python API to resolve the best audio URL, then proxies
+raw bytes to the browser via httpx — nothing written to disk.
+yt-dlp handles format selection and the ``moov`` atom positioning so
+the browser can play *immediately*.
 """
 
 import asyncio
@@ -43,7 +43,7 @@ async def stream_audio_chunks(query: str, info: Optional[dict] = None) -> AsyncG
         logger.error(f"Could not resolve stream URL for: {query}")
         return
 
-    async for chunk in proxy_audio_chunks(info["url"], query):
+    async for chunk in proxy_audio_chunks(info["url"], query, headers=info.get("http_headers")):
         yield chunk
 
 
@@ -89,11 +89,12 @@ async def resolve_stream(query: str) -> Optional[dict]:
 
         entry = info["entries"][0]
         result = {
-            "url":         entry.get("url", ""),
-            "title":       entry.get("title", ""),
-            "duration":    entry.get("duration", 0),
-            "thumbnail":   entry.get("thumbnail", ""),
-            "webpage_url": entry.get("webpage_url", ""),
+            "url":           entry.get("url", ""),
+            "title":         entry.get("title", ""),
+            "duration":      entry.get("duration", 0),
+            "thumbnail":     entry.get("thumbnail", ""),
+            "webpage_url":   entry.get("webpage_url", ""),
+            "http_headers":  entry.get("http_headers", {}),
         }
 
         if not result["url"]:
@@ -117,10 +118,21 @@ async def resolve_stream(query: str) -> Optional[dict]:
         return None
 
 
-async def proxy_audio_chunks(audio_url: str, query: str) -> AsyncGenerator[bytes, None]:
-    """Proxy a YouTube audio URL via httpx (64 KiB chunks, zero disk)."""
+async def proxy_audio_chunks(audio_url: str, query: str, headers: dict = None) -> AsyncGenerator[bytes, None]:
+    """Proxy a YouTube audio URL via httpx (64 KiB chunks, zero disk).
+
+    Passes *headers* (from yt-dlp's ``http_headers`` or a sensible
+    browser-like fallback) so YouTube's CDN doesn't 403 the request."""
+    if not headers:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.youtube.com/",
+            "Range": "bytes=0-",
+        }
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0), headers=headers) as client:
             async with client.stream("GET", audio_url, follow_redirects=True) as resp:
                 if resp.status_code >= 400:
                     logger.error(f"YouTube stream HTTP {resp.status_code} for {query}")
