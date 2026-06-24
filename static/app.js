@@ -1362,6 +1362,7 @@ function updateDownloadOverlay(stage, pct, detail) {
 async function pollPlaylistBatch(taskIds) {
     const startTime = Date.now();
     const MAX_DURATION_MS = 30 * 60 * 1000; // 30 minute timeout
+    const filenames = []; // collect completed filenames for zip
 
     const pollAll = async () => {
         if (Date.now() - startTime > MAX_DURATION_MS) {
@@ -1380,7 +1381,13 @@ async function pollPlaylistBatch(taskIds) {
                 const task = await res.json();
                 if (task.status === 'complete') {
                     completed++;
-                    if (task.filename) trackDownloadedFile(task.filename);
+                    if (task.filename) {
+                        // Collect filename for zip but DON'T auto-download individually
+                        if (!filenames.includes(task.filename)) {
+                            filenames.push(task.filename);
+                        }
+                        trackDownloadedFile(task.filename);
+                    }
                 } else if (task.status === 'failed') {
                     hasFailed = true;
                     completed++;
@@ -1403,10 +1410,43 @@ async function pollPlaylistBatch(taskIds) {
             }
             showToast(`Downloaded ${completed} tracks`, 'success');
             renderLocalFiles();
-            setTimeout(() => {
-                hideDownloadOverlay();
-                openTab(state.activeTab);
-            }, 2500);
+
+            // Zip and deliver, then close overlay — wait for zip to finish
+            const finish = async () => {
+                if (filenames.length > 0) {
+                    updateDownloadOverlay('zipping', 99, 'Creating zip...');
+                    try {
+                        const zipRes = await fetch('/playlists/download-zip', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ filenames }),
+                        });
+                        if (zipRes.ok) {
+                            const blob = await zipRes.blob();
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `playlist-${Date.now()}.zip`;
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
+                            URL.revokeObjectURL(url);
+                            updateDownloadOverlay('complete', 100, 'Zip ready!');
+                            showToast(`Zipped ${filenames.length} tracks!`, 'success');
+                        } else {
+                            showToast('Zip creation failed', 'error');
+                        }
+                    } catch (e) {
+                        showToast('Failed to create zip', 'error');
+                        devLog('Zip error', { error: e.message });
+                    }
+                }
+                setTimeout(() => {
+                    hideDownloadOverlay();
+                    openTab(state.activeTab);
+                }, 2500);
+            };
+            finish();
         } else {
             setTimeout(pollAll, 1500);
         }
