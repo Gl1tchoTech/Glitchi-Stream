@@ -21,6 +21,7 @@ const state = {
     _downloadStartTime: null,       // for ETA calculation
     _downloadTotalTracks: 0,       // for playlist batch progress
     _downloadCompletedTracks: 0,   // for playlist batch progress
+    _pollWorker: null,             // Web Worker for background-safe polling
 };
 
 // ===== Logger (dev mode) =====
@@ -85,6 +86,9 @@ document.addEventListener('DOMContentLoaded', () => {
     openTab(state.activeTab);
     loadFiles();
     renderPlaylists();
+    // Create background polling worker (not throttled when tab is hidden)
+    state._pollWorker = new Worker('/static/download-poll-worker.js');
+    state._pollWorker.onmessage = _handleWorkerMessage;
     resumeActiveDownloads();
     if (state.devMode) unlockDevUI();
     devLog('App initialized', { theme: state.theme, devMode: state.devMode });
@@ -1140,7 +1144,78 @@ async function triggerDownload() {
 
 // ===== Download Progress System =====
 const PROGRESS_PCT_MAP = { pending: 5, downloading: 30, processing: 75, complete: 100, failed: 100 };
-let _activePollTimers = {};
+let _pollContexts = {};   // { taskId: { progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl } }
+let _batchTrackers = {};  // { batchKey: { taskIds, startTime, filenames, total } }
+
+// Called by the Web Worker when it has progress for a task
+function _handleWorkerMessage(e) {
+    const msg = e.data;
+    const taskId = msg.taskId;
+
+    // Handle batch tasks — worker polls these in the background so
+    // playlist downloads keep progressing even when the tab is hidden.
+    for (const [batchKey, bt] of Object.entries(_batchTrackers)) {
+        if (bt.taskIds.includes(taskId)) {
+            if (msg.status === 'complete' || msg.status === 'failed') {
+                _onBatchTaskDone(batchKey, taskId, msg.status, msg.filename);
+            }
+            return; // batch task — don't process as single-task
+        }
+    }
+
+    // Handle single-task progress UI
+    const ctx = _pollContexts[taskId];
+    if (!ctx) return;
+
+    // Apply progress to UI
+    if (ctx.isInline && ctx.fillEl) {
+        const pct = PROGRESS_PCT_MAP[msg.status] || 0;
+        ctx.fillEl.style.width = `${pct}%`;
+        ctx.stageEl.textContent = msg.stage || msg.status;
+        if (msg.status === 'complete') ctx.fillEl.style.background = '#22c55e';
+        if (msg.status === 'failed') ctx.fillEl.style.background = '#ef4444';
+    } else if (ctx.progressEl) {
+        updateProgressBar(msg, ctx.progressEl, ctx.fillEl, ctx.pctEl, ctx.stageEl);
+    }
+
+    if (msg.status === 'complete') {
+        delete _pollContexts[taskId];
+        localStorage.removeItem('glitchi-active-download');
+        if (ctx.btn) { ctx.btn.disabled = false; ctx.btn.style.opacity = ''; }
+        if (ctx.isInline && ctx.progressEl) { ctx.stageEl.textContent = '✅ Ready!'; ctx.fillEl.style.width = '100%'; ctx.fillEl.style.background = '#22c55e'; setTimeout(() => ctx.progressEl.remove(), 3000); }
+        if (msg.filename) {
+            const displayName = msg.filename.split('/').pop() || 'download.mp3';
+            showToast(`Downloaded: ${displayName}`, 'success');
+            state._downloadCompletedTracks = (state._downloadCompletedTracks || 0) + 1;
+            updateDownloadOverlay('complete', 100, displayName);
+            setTimeout(() => hideDownloadOverlay(), 2500);
+            setTimeout(async () => {
+                try {
+                    const fileRes = await fetch(`/files/download/${encodeURIComponent(msg.filename)}`);
+                    if (!fileRes.ok) { showToast('Failed to fetch file', 'error'); return; }
+                    const blob = await fileRes.blob();
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a'); a.href = blobUrl; a.download = msg.filename.split('/').pop() || 'download.mp3';
+                    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(blobUrl);
+                } catch (e) { showToast('Download payload failed', 'error'); }
+            }, 300);
+            trackDownloadedFile(msg.filename);
+            if (!ctx.isInline) setTimeout(() => { if (ctx.progressEl) ctx.progressEl.classList.add('hidden'); if (ctx.source === 'tab') document.getElementById('download-url').value = ''; renderLocalFiles(); }, 2000);
+        }
+    } else if (msg.status === 'failed') {
+        delete _pollContexts[taskId];
+        localStorage.removeItem('glitchi-active-download');
+        if (ctx.btn) { ctx.btn.disabled = false; ctx.btn.style.opacity = ''; }
+        if (!ctx.isInline) showToast(msg.error || 'Download failed', 'error');
+        if (ctx.isInline && ctx.progressEl) { ctx.stageEl.textContent = '❌ Failed'; ctx.fillEl.style.background = '#ef4444'; setTimeout(() => ctx.progressEl.remove(), 4000); }
+        else if (ctx.progressEl) setTimeout(() => ctx.progressEl.classList.add('hidden'), 4000);
+        updateDownloadOverlay('failed', 0, msg.error || 'Download failed');
+        setTimeout(() => hideDownloadOverlay(), 4000);
+    } else {
+        const pct = PROGRESS_PCT_MAP[msg.status] || 0;
+        updateDownloadOverlay(msg.status, pct, msg.stage || msg.status);
+    }
+}
 
 async function startDownloadWithProgress(url, source, cardEl, extraFields = {}) {
     let progressEl, stageEl, pctEl, fillEl, btn, isInline = false;
@@ -1192,63 +1267,11 @@ async function startDownloadWithProgress(url, source, cardEl, extraFields = {}) 
 }
 
 function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl) {
-    if (_activePollTimers[taskId]) clearInterval(_activePollTimers[taskId]);
-    const poll = async () => {
-        try {
-            const res = await fetch(`/download/progress/${taskId}`);
-            if (!res.ok) { clearInterval(_activePollTimers[taskId]); delete _activePollTimers[taskId]; return; }
-            const task = await res.json();
-            if (isInline && fillEl) {
-                const pct = PROGRESS_PCT_MAP[task.status] || 0;
-                fillEl.style.width = `${pct}%`;
-                stageEl.textContent = task.stage || task.status;
-                if (task.status === 'complete') fillEl.style.background = '#22c55e';
-                if (task.status === 'failed') fillEl.style.background = '#ef4444';
-            } else if (progressEl) { updateProgressBar(task, progressEl, fillEl, pctEl, stageEl); }
-            if (task.status === 'complete') {
-                clearInterval(_activePollTimers[taskId]); delete _activePollTimers[taskId];
-                localStorage.removeItem('glitchi-active-download');
-                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-                if (isInline && progressEl) { stageEl.textContent = '✅ Ready!'; fillEl.style.width = '100%'; fillEl.style.background = '#22c55e'; setTimeout(() => progressEl.remove(), 3000); }
-                if (task.filename) {
-                    const displayName = task.filename.split('/').pop() || 'download.mp3';
-                    showToast(`Downloaded: ${displayName}`, 'success');
-                    state._downloadCompletedTracks = (state._downloadCompletedTracks || 0) + 1;
-                    // Show overlay completion for all download sources
-                    updateDownloadOverlay('complete', 100, displayName);
-                    setTimeout(() => hideDownloadOverlay(), 2500);
-                    setTimeout(async () => {
-                        try {
-                            const fileRes = await fetch(`/files/download/${encodeURIComponent(task.filename)}`);
-                            if (!fileRes.ok) { showToast('Failed to fetch file', 'error'); return; }
-                            const blob = await fileRes.blob();
-                            const blobUrl = URL.createObjectURL(blob);
-                            const a = document.createElement('a'); a.href = blobUrl; a.download = task.filename.split('/').pop() || 'download.mp3';
-                            document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(blobUrl);
-                        } catch (e) { showToast('Download payload failed', 'error'); }
-                    }, 300);
-                    trackDownloadedFile(task.filename);
-                    if (!isInline) setTimeout(() => { progressEl.classList.add('hidden'); if (source === 'tab') document.getElementById('download-url').value = ''; renderLocalFiles(); }, 2000);
-                }
-            } else if (task.status === 'failed') {
-                clearInterval(_activePollTimers[taskId]); delete _activePollTimers[taskId];
-                localStorage.removeItem('glitchi-active-download');
-                if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-                if (!isInline) showToast(task.error || 'Download failed', 'error');
-                if (isInline && progressEl) { stageEl.textContent = '❌ Failed'; fillEl.style.background = '#ef4444'; setTimeout(() => progressEl.remove(), 4000); }
-                else setTimeout(() => progressEl.classList.add('hidden'), 4000);
-                updateDownloadOverlay('failed', 0, task.error || 'Download failed');
-                setTimeout(() => hideDownloadOverlay(), 4000);
-            } else {
-                // Update the loading overlay for all downloads
-                const pct = PROGRESS_PCT_MAP[task.status] || 0;
-                const stage = task.stage || task.status;
-                updateDownloadOverlay(task.status, pct, stage);
-            }
-        } catch (e) { devLog('Progress poll error', { taskId, error: e.message }); }
-    };
-    poll();
-    _activePollTimers[taskId] = setInterval(poll, 1000);
+    // Store context — _handleWorkerMessage applies UI updates when worker posts progress.
+    // The Web Worker polls in a separate thread so downloads keep progressing
+    // even when the browser tab is hidden or in the background.
+    _pollContexts[taskId] = { progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl };
+    if (state._pollWorker) state._pollWorker.postMessage({ action: 'start', taskId });
 }
 
 function updateProgressBar(task, progressEl, fillEl, pctEl, stageEl) {
@@ -1279,7 +1302,20 @@ function resumeActiveDownloads() {
         const pctEl = document.getElementById(isDetail ? 'detail-progress-pct' : 'progress-pct');
         const fillEl = document.getElementById(isDetail ? 'detail-progress-fill-dl' : 'progress-fill-dl');
         const btn = document.getElementById(isDetail ? 'btn-detail-download' : 'btn-download');
-        if (progressEl) { progressEl.classList.remove('hidden'); pollDownloadProgress(info.taskId, progressEl, stageEl, pctEl, fillEl, info.source, btn); }
+        if (progressEl) {
+            progressEl.classList.remove('hidden');
+            // Resume via single poll + worker (works in background tabs)
+            _pollContexts[info.taskId] = { progressEl, stageEl, pctEl, fillEl, source: info.source, btn, isInline: false, cardEl: null };
+            (async () => {
+                try {
+                    const res = await fetch(`/download/progress/${info.taskId}`);
+                    if (!res.ok) return;
+                    const task = await res.json();
+                    _handleWorkerMessage({ data: { taskId: info.taskId, ...task } });
+                } catch (_) {}
+            })();
+            if (state._pollWorker) state._pollWorker.postMessage({ action: 'start', taskId: info.taskId });
+        }
     } catch (e) { localStorage.removeItem('glitchi-active-download'); }
 }
 
@@ -1360,98 +1396,130 @@ function updateDownloadOverlay(stage, pct, detail) {
 }
 
 async function pollPlaylistBatch(taskIds) {
-    const startTime = Date.now();
-    const MAX_DURATION_MS = 30 * 60 * 1000; // 30 minute timeout
-    const filenames = []; // collect completed filenames for zip
+    const batchKey = `batch_${Date.now()}`;
 
-    const pollAll = async () => {
-        if (Date.now() - startTime > MAX_DURATION_MS) {
+    _batchTrackers[batchKey] = {
+        taskIds,
+        filenames: [],
+        completed: 0,
+        failed: 0,
+        completedTasks: new Set(),
+        startTime: Date.now(),
+        finished: false
+    };
+
+    // Let the worker poll all tasks in a separate thread — not throttled
+    // when the browser tab is hidden or in the background.
+    if (state._pollWorker) state._pollWorker.postMessage({ action: 'start', taskIds });
+
+    // Lightweight UI update loop — only refreshes the overlay, doesn't
+    // do its own fetches since the worker handles all data collection.
+    const updateUI = () => {
+        const bt = _batchTrackers[batchKey];
+        if (!bt || bt.finished) return;
+
+        const completed = bt.completed + bt.failed;
+        const total = taskIds.length;
+        const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+        state._downloadCompletedTracks = completed;
+        updateDownloadOverlay('downloading', pct, `${completed}/${total} tracks`);
+
+        // Check timeout
+        if (Date.now() - bt.startTime > 30 * 60 * 1000) {
+            bt.finished = true;
+            if (state._pollWorker) state._pollWorker.postMessage({ action: 'stop', taskIds });
             updateDownloadOverlay('failed', 0, 'Playlist download timed out');
             showToast('Playlist download timed out', 'error');
             setTimeout(() => hideDownloadOverlay(), 3000);
+            delete _batchTrackers[batchKey];
             return;
         }
-        let allDone = true;
-        let hasFailed = false;
-        let completed = 0;
-        for (const tid of taskIds) {
-            try {
-                const res = await fetch(`/download/progress/${tid}`);
-                if (!res.ok) continue;
-                const task = await res.json();
-                if (task.status === 'complete') {
-                    completed++;
-                    if (task.filename) {
-                        // Collect filename for zip but DON'T auto-download individually
-                        if (!filenames.includes(task.filename)) {
-                            filenames.push(task.filename);
-                        }
-                        trackDownloadedFile(task.filename);
-                    }
-                } else if (task.status === 'failed') {
-                    hasFailed = true;
-                    completed++;
-                } else {
-                    allDone = false;
-                }
-            } catch (e) { allDone = false; }
-        }
 
-        state._downloadCompletedTracks = completed;
-        const total = taskIds.length;
-        const pct = Math.round((completed / total) * 100);
-        updateDownloadOverlay('downloading', pct, `${completed}/${total} tracks`);
-
-        if (allDone) {
-            if (hasFailed) {
-                updateDownloadOverlay('complete', 100, `${completed} tracks processed (some failed)`);
-            } else {
-                updateDownloadOverlay('complete', 100, `All ${completed} tracks downloaded!`);
-            }
-            showToast(`Downloaded ${completed} tracks`, 'success');
-            renderLocalFiles();
-
-            // Zip and deliver, then close overlay — wait for zip to finish
-            const finish = async () => {
-                if (filenames.length > 0) {
-                    updateDownloadOverlay('zipping', 99, 'Creating zip...');
-                    try {
-                        const zipRes = await fetch('/playlists/download-zip', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ filenames }),
-                        });
-                        if (zipRes.ok) {
-                            const blob = await zipRes.blob();
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = `playlist-${Date.now()}.zip`;
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
-                            URL.revokeObjectURL(url);
-                            updateDownloadOverlay('complete', 100, 'Zip ready!');
-                            showToast(`Zipped ${filenames.length} tracks!`, 'success');
-                        } else {
-                            showToast('Zip creation failed', 'error');
-                        }
-                    } catch (e) {
-                        showToast('Failed to create zip', 'error');
-                        devLog('Zip error', { error: e.message });
-                    }
-                }
-                setTimeout(() => {
-                    hideDownloadOverlay();
-                    openTab(state.activeTab);
-                }, 2500);
-            };
-            finish();
-        } else {
-            setTimeout(pollAll, 1500);
-        }
+        setTimeout(updateUI, 1500);
     };
-    pollAll();
+    updateUI();
+}
+
+// Called by _handleWorkerMessage when the worker reports a batch task finished.
+// Tracks completion/failure counts and filenames, then checks if all tasks are done.
+function _onBatchTaskDone(batchKey, taskId, status, filename) {
+    const bt = _batchTrackers[batchKey];
+    if (!bt || bt.finished) return;
+
+    if (status === 'complete') {
+        if (!bt.completedTasks.has(taskId)) {
+            bt.completedTasks.add(taskId);
+            bt.completed++;
+            if (filename && !bt.filenames.includes(filename)) {
+                bt.filenames.push(filename);
+                trackDownloadedFile(filename);
+            }
+        }
+    } else if (status === 'failed') {
+        if (!bt.completedTasks.has(taskId)) {
+            bt.completedTasks.add(taskId);
+            bt.failed++;
+        }
+    }
+
+    state._downloadCompletedTracks = bt.completed + bt.failed;
+
+    // All tasks finished? Zip and deliver.
+    if (bt.completed + bt.failed >= bt.taskIds.length) {
+        bt.finished = true;
+        _finishBatchPlaylist(batchKey);
+    }
+}
+
+async function _finishBatchPlaylist(batchKey) {
+    const bt = _batchTrackers[batchKey];
+    if (!bt) return;
+
+    if (state._pollWorker) state._pollWorker.postMessage({ action: 'stop', taskIds: bt.taskIds });
+
+    const hasFailed = bt.failed > 0;
+    const completed = bt.completed + bt.failed;
+
+    if (hasFailed) {
+        updateDownloadOverlay('complete', 100, `${completed} tracks processed (some failed)`);
+    } else {
+        updateDownloadOverlay('complete', 100, `All ${bt.completed} tracks downloaded!`);
+    }
+    showToast(`Downloaded ${bt.completed} tracks`, 'success');
+    renderLocalFiles();
+
+    if (bt.filenames.length > 0) {
+        updateDownloadOverlay('zipping', 99, 'Creating zip...');
+        try {
+            const zipRes = await fetch('/playlists/download-zip', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filenames: bt.filenames }),
+            });
+            if (zipRes.ok) {
+                const blob = await zipRes.blob();
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `playlist-${Date.now()}.zip`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                updateDownloadOverlay('complete', 100, 'Zip ready!');
+                showToast(`Zipped ${bt.filenames.length} tracks!`, 'success');
+            } else {
+                showToast('Zip creation failed', 'error');
+            }
+        } catch (e) {
+            showToast('Failed to create zip', 'error');
+            devLog('Zip error', { error: e.message });
+        }
+    }
+
+    setTimeout(() => { hideDownloadOverlay(); openTab(state.activeTab); }, 2500);
+    delete _batchTrackers[batchKey];
 }
 
 // ===== Playlists =====
