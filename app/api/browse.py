@@ -8,6 +8,7 @@ from app.services.spotify_search_service import (
     browse_by_category,
     get_new_releases,
     get_featured_playlists,
+    recommended_for_you,
     BROWSE_CATEGORIES,
 )
 
@@ -120,6 +121,51 @@ async def featured(
         raise HTTPException(status_code=502, detail=f"Featured API error: {e}")
 
     results = SearchResults(query="featured")
+
+    if "playlists" in raw:
+        for pl in raw["playlists"].get("items", []):
+            results.playlists.append(
+                Playlist(
+                    name=pl.get("name", ""),
+                    id=pl.get("id", ""),
+                    description=pl.get("description", ""),
+                    image_url=pl.get("image_url", ""),
+                    url=pl.get("url", ""),
+                    tracks_count=pl.get("tracks_count", 0),
+                    owner=pl.get("owner", ""),
+                )
+            )
+
+    if "tracks" in raw:
+        for t in raw["tracks"].get("items", []):
+            results.tracks.append(
+                Track(
+                    name=t.get("name", ""),
+                    id=t.get("id", ""),
+                    artists=t.get("artists", ""),
+                    album=t.get("album", ""),
+                    album_image_url=t.get("album_image_url", ""),
+                    duration_ms=t.get("duration_ms", 0),
+                    preview_url=t.get("preview_url"),
+                    url=t.get("url", ""),
+                )
+            )
+
+    return results
+
+
+@router.get("/personalized")
+async def personalized(
+    preferred_categories: list[str] = Query([], alias="cats"),
+    limit: int = Query(12, ge=1, le=30),
+):
+    """Get personalized recommendations based on user's preferred categories."""
+    try:
+        raw = recommended_for_you(preferred_categories, limit=limit)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Personalized API error: {e}")
+
+    results = SearchResults(query="personalized")
 
     if "playlists" in raw:
         for pl in raw["playlists"].get("items", []):

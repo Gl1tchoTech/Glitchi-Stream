@@ -96,6 +96,10 @@
                 </div>
                 <!-- Browse content area (shows Featured/New/Trending or filtered results) -->
                 <div id="browse-content">
+                    <div class="browse-section hidden" id="browse-for-you-section">
+                        <h2 class="section-title">For You</h2>
+                        <div class="h-scroll" id="browse-for-you"></div>
+                    </div>
                     <div class="browse-section" id="browse-featured-section">
                         <h2 class="section-title">Featured</h2>
                         <div class="h-scroll" id="browse-featured"></div>
@@ -343,54 +347,54 @@
         </nav>
     </div>
 
-    <!-- ===== Detail View Modal ===== -->
-    <div class="modal-overlay" id="detail-modal" style="display:none">
-        <div class="modal-content">
-            <button class="modal-close" id="modal-close">&times;</button>
-            <div class="detail-header">
-                <img id="detail-cover" class="detail-cover" src="" alt="" onerror="this.style.display='none'">
-                <div class="detail-info">
-                    <span class="detail-type" id="detail-type"></span>
-                    <h1 id="detail-title"></h1>
-                    <p id="detail-subtitle"></p>
-                    <p id="detail-meta"></p>
-                    <div class="detail-actions">
-                        <button class="btn-primary" id="btn-detail-download">
-                            <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                            Download
-                        </button>
-                        <button class="btn-accent" id="btn-detail-stream">
-                            <svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>
-                            Stream
-                        </button>
-                        <button class="btn-secondary" id="btn-detail-add-playlist">
-                            <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-                            Add to Playlist
-                        </button>
-                        <button class="btn-secondary" id="btn-detail-open-spotify">
-                            <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/><path d="M16.5 8.5c-2.5-1.5-6.5-1.5-9 0l.5 1c2-1 5.5-1 7.5 0l1-1zM15 11c-2-1-5-1-7 0l.5 1c1.5-.8 4-.8 5.5 0l1-1zM13.5 13.5c-1.5-.8-3.5-.8-5 0l.5 1c1-.5 3-.5 4 0l.5-1z" fill="var(--bg-primary)"/></svg>
-                            Open in Spotify
-                        </button>
+    <!-- ===== Track/Album Preview (Spotify-style fullscreen) ===== -->
+    <div class="preview-overlay hidden" id="detail-modal">
+        <div class="preview-sheet">
+            <div class="preview-header">
+                <button class="preview-back" id="modal-close">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M15 18l-6-6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+                <span class="preview-type" id="detail-type"></span>
+                <div style="width:36px"></div>
+            </div>
+            <div class="preview-hero">
+                <img id="detail-cover" class="preview-cover" src="" alt="" onerror="this.style.display='none'">
+                <div class="preview-cover-pulse" id="preview-cover-pulse" style="display:none">
+                    <div class="pulse-ring"></div>
+                    <div class="pulse-ring" style="animation-delay:0.5s"></div>
+                    <div class="pulse-ring" style="animation-delay:1s"></div>
+                </div>
+                <h1 class="preview-title" id="detail-title"></h1>
+                <p class="preview-subtitle" id="detail-subtitle"></p>
+                <p class="preview-meta" id="detail-meta"></p>
+                <div class="preview-actions">
+                    <button class="preview-btn primary" id="btn-detail-download">
+                        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        <span>Download</span>
+                    </button>
+                    <button class="preview-btn accent" id="btn-detail-stream">
+                        <svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>
+                        <span>Stream</span>
+                    </button>
+                    <button class="preview-btn secondary" id="btn-detail-add-playlist">
+                        <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        <span>Add</span>
+                    </button>
+                    <button class="preview-btn secondary" id="btn-detail-open-spotify">
+                        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/><path d="M16.5 8.5c-2.5-1.5-6.5-1.5-9 0l.5 1c2-1 5.5-1 7.5 0l1-1zM15 11c-2-1-5-1-7 0l.5 1c1.5-.8 4-.8 5.5 0l1-1zM13.5 13.5c-1.5-.8-3.5-.8-5 0l.5 1c1-.5 3-.5 4 0l.5-1z" fill="var(--bg-primary)"/></svg>
+                    </button>
+                </div>
+                <div id="detail-download-progress" class="download-progress hidden" style="margin-top:12px;width:100%">
+                    <div class="progress-header">
+                        <span class="progress-stage" id="detail-progress-stage">Preparing...</span>
+                        <span class="progress-pct" id="detail-progress-pct">0%</span>
                     </div>
-                    <div id="detail-download-progress" class="download-progress hidden" style="margin-top:16px">
-                        <div class="progress-header">
-                            <span class="progress-stage" id="detail-progress-stage">Preparing...</span>
-                            <span class="progress-pct" id="detail-progress-pct">0%</span>
-                        </div>
-                        <div class="progress-track-dl">
-                            <div class="progress-fill-dl" id="detail-progress-fill-dl"></div>
-                        </div>
-                        <div class="progress-steps">
-                            <span class="progress-step" data-step="pending">Queued</span>
-                            <span class="progress-step" data-step="downloading">Downloading</span>
-                            <span class="progress-step" data-step="processing">Processing</span>
-                            <span class="progress-step" data-step="complete">Ready</span>
-                        </div>
+                    <div class="progress-track-dl">
+                        <div class="progress-fill-dl" id="detail-progress-fill-dl"></div>
                     </div>
                 </div>
             </div>
-            <div class="detail-tracks" id="detail-tracks">
-                <h2>Tracks</h2>
+            <div class="preview-tracks" id="detail-tracks">
                 <div id="detail-tracks-list"></div>
             </div>
         </div>
@@ -428,7 +432,6 @@
                 <h3>Download Engine</h3>
                 <p class="settings-hint">Which tool to use for downloading tracks</p>
                 <select id="settings-downloader" class="input-field">
-                    <option value="spotiflac">SpotiFLAC (Lossless, Qobuz/Tidal)</option>
                     <option value="ytdlp">yt-dlp (YouTube Audio)</option>
                     <option value="spotdl">SpotDL (Spotify → YouTube)</option>
                 </select>
@@ -487,6 +490,27 @@
 
     <!-- ===== Toast Container ===== -->
     <div id="toast-container"></div>
+
+    <!-- ===== Download Loading Overlay (Spotisaver-style) ===== -->
+    <div class="dl-overlay hidden" id="download-overlay">
+        <div class="dl-overlay-bg"></div>
+        <div class="dl-overlay-card">
+            <div class="dl-overlay-spinner">
+                <svg viewBox="0 0 100 100">
+                    <circle class="dl-circle-bg" cx="50" cy="50" r="45" fill="none" stroke="var(--bg-elevated)" stroke-width="6"/>
+                    <circle class="dl-circle-progress" id="dl-overlay-circle" cx="50" cy="50" r="45" fill="none" stroke="var(--accent)" stroke-width="6" stroke-linecap="round" stroke-dasharray="283" stroke-dashoffset="283" transform="rotate(-90 50 50)"/>
+                </svg>
+                <span class="dl-overlay-pct" id="dl-overlay-pct">0%</span>
+            </div>
+            <h2 class="dl-overlay-name" id="dl-overlay-name">Downloading...</h2>
+            <p class="dl-overlay-status" id="dl-overlay-status">Starting...</p>
+            <p class="dl-overlay-eta" id="dl-overlay-eta">Estimating...</p>
+            <p class="dl-overlay-track-count" id="dl-overlay-track-count" style="display:none"></p>
+            <div class="dl-overlay-bar">
+                <div class="dl-overlay-fill" id="dl-overlay-fill"></div>
+            </div>
+        </div>
+    </div>
 
     <script src="/static/app.js"></script>
 </body>

@@ -278,6 +278,30 @@ def get_new_releases(limit: int = 20) -> dict:
     )
 
 
+def recommended_for_you(preferred_categories: list[str], limit: int = 12) -> dict:
+    """Get personalized recommendations based on user's preferred categories.
+
+    If *preferred_categories* is empty, falls back to featured playlists.
+    """
+    logger.info(f"Personalized recs: cats={preferred_categories[:5]}...")
+    if not preferred_categories:
+        return get_featured_playlists(limit=limit)
+
+    # Pick the top 2 categories and search for them
+    top_cats = preferred_categories[:2]
+    top_cat_names = [
+        next((c["name"] for c in BROWSE_CATEGORIES if c["id"] == cat_id), cat_id)
+        for cat_id in top_cats
+    ]
+    query = " ".join(f"{name} mix" for name in top_cat_names)
+    return search_spotify(
+        q=query,
+        search_type="playlist,track",
+        limit=limit,
+        market="US",
+    )
+
+
 def get_featured_playlists(limit: int = 20) -> dict:
     """Get featured/curated playlists."""
     logger.info(f"Featured playlists: limit={limit}")

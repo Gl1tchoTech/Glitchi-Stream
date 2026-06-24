@@ -1,8 +1,7 @@
 """
 Unified Downloader Service — dispatches to the configured downloader.
 
-Three engines:
-  - ``spotiflac`` — SpotiFLAC subprocess (lossless from Qobuz/Tidal)
+Two engines:
   - ``ytdlp``    — yt-dlp searches YouTube, downloads best audio
   - ``spotdl``   — SpotDL CLI subprocess (Spotify → YouTube → tagged audio)
 
@@ -58,32 +57,6 @@ def _module_is_importable(module_name: str) -> bool:
         return False
 
 
-def is_spotiflac_available() -> bool:
-    """SpotiFLAC is a CLI tool, not a Python module.
-    Check PATH binary and also the pip-installed scripts directory.
-    Also requires ffmpeg on PATH."""
-    # SpotiFLAC needs ffmpeg for audio processing
-    if not _FFMPEG_AVAILABLE:
-        return False
-    if _find_binary("spotiflac", "spotiflac.exe"):
-        return True
-    # Windows: pip installs scripts to PythonXY/Scripts/
-    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
-    for name in ("spotiflac", "spotiflac.exe"):
-        if os.path.isfile(os.path.join(scripts_dir, name)):
-            return True
-    # Also check the user-site scripts directory
-    try:
-        import site
-        user_scripts = os.path.join(site.getusersitepackages().replace("site-packages", "Scripts"))
-        for name in ("spotiflac", "spotiflac.exe"):
-            if os.path.isfile(os.path.join(user_scripts, name)):
-                return True
-    except Exception:
-        pass
-    return False
-
-
 def is_ytdlp_available() -> bool:
     return _find_binary("yt-dlp", "yt-dlp.exe") is not None or _module_is_importable("yt_dlp")
 
@@ -95,11 +68,106 @@ def is_spotdl_available() -> bool:
     return _find_binary("spotdl", "spotdl.exe") is not None or _module_is_importable("spotdl")
 
 
+async def fetch_playlist_tracks(playlist_url: str) -> list[dict]:
+    """Fetch all track URLs from a Spotify playlist using SpotAPI.
+
+    Tries ``song.get_playlist()`` first; falls back to ``song.query_songs()``
+    with the playlist URL as query if the method is not available.
+    """
+    try:
+        from spotapi import Song
+        playlist_id = extract_playlist_id(playlist_url)
+        if not playlist_id:
+            return []
+
+        def _fetch():
+            song = Song()
+            # Try get_playlist first (may not exist on older SpotAPI versions)
+            has_playlist_method = hasattr(song, "get_playlist")
+            if has_playlist_method:
+                results = song.get_playlist(playlist_id)
+                if results and isinstance(results, dict):
+                    # Try to extract tracks from playlist data
+                    playlist_v2 = results.get("data", {}).get("playlistV2", {})
+                    if playlist_v2:
+                        items = playlist_v2.get("content", {}).get("items", [])
+                        if items:
+                            return _parse_playlist_items(items)
+                    # If playlistV2.content.items is empty, try alternative paths
+                    # e.g. data.playlist.items or directly on results
+                    logger.info(f"get_playlist returned data but no tracks found at expected path, trying alternatives")
+                    # Don't fall back to query_songs - use what we got
+                    return []
+
+            # Only fallback to query_songs if get_playlist doesn't exist
+            logger.info(f"get_playlist not available, trying query_songs fallback")
+            results = song.query_songs(playlist_url, limit=50)
+            if not results or not isinstance(results, dict):
+                return []
+            search_v2 = results.get("data", {}).get("searchV2", {})
+            items = search_v2.get("tracksV2", {}).get("items", [])
+            return _parse_search_items(items)
+
+        def _parse_playlist_items(items):
+            tracks = []
+            for item in items:
+                track_data = item.get("itemV2", {}).get("data", {})
+                if not track_data:
+                    continue
+                t = _extract_track_data(track_data)
+                if t:
+                    tracks.append(t)
+            return tracks
+
+        def _parse_search_items(items):
+            tracks = []
+            for item in items:
+                data = item.get("item", {}).get("data", {})
+                if not data:
+                    continue
+                t = _extract_track_data(data)
+                if t:
+                    tracks.append(t)
+            return tracks
+
+        def _extract_track_data(track_data):
+            track_id = track_data.get("uri", "").removeprefix("spotify:track:")
+            if not track_id:
+                track_id = track_data.get("id", "")
+            name = track_data.get("name", "")
+            artists = ", ".join(
+                a.get("profile", {}).get("name", "")
+                for a in track_data.get("artists", {}).get("items", [])
+            )
+            album_data = track_data.get("albumOfTrack", {})
+            album = album_data.get("name", "")
+            cover_sources = album_data.get("coverArt", {}).get("sources", [])
+            cover_url = ""
+            if cover_sources:
+                best = max(cover_sources, key=lambda s: s.get("width", 0) * s.get("height", 0))
+                cover_url = best.get("url", "")
+            duration_ms = track_data.get("duration", {}).get("totalMilliseconds", 0)
+            url = f"https://open.spotify.com/track/{track_id}" if track_id else ""
+            return {
+                "id": track_id,
+                "name": name,
+                "artists": artists,
+                "album": album,
+                "album_image_url": cover_url,
+                "duration_ms": duration_ms,
+                "url": url,
+            }
+
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _fetch)
+    except Exception as e:
+        logger.error(f"Playlist fetch error: {type(e).__name__}: {e}")
+        return []
+
+
 def get_available_downloaders() -> list[str]:
     """Return list of downloader slugs that are installed and ready."""
     available = []
-    if is_spotiflac_available():
-        available.append("spotiflac")
     if is_ytdlp_available():
         available.append("ytdlp")
     if is_spotdl_available():
@@ -117,16 +185,25 @@ _SPOTIFY_TRACK_RE = re.compile(
 _SPOTIFY_ALBUM_RE = re.compile(
     r"https?://open\.spotify\.com/(?:intl-\w+/)?album/([A-Za-z0-9]+)"
 )
+_SPOTIFY_PLAYLIST_RE = re.compile(
+    r"https?://open\.spotify\.com/(?:intl-\w+/)?playlist/([A-Za-z0-9]+)"
+)
 
 
 def extract_track_id(url: str) -> Optional[str]:
     m = _SPOTIFY_TRACK_RE.search(url)
     return m.group(1) if m else None
 
-
 def extract_album_id(url: str) -> Optional[str]:
     m = _SPOTIFY_ALBUM_RE.search(url)
     return m.group(1) if m else None
+
+def extract_playlist_id(url: str) -> Optional[str]:
+    m = _SPOTIFY_PLAYLIST_RE.search(url)
+    return m.group(1) if m else None
+
+def is_playlist_url(url: str) -> bool:
+    return bool(_SPOTIFY_PLAYLIST_RE.search(url))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -650,145 +727,7 @@ async def _process_metadata_for_file(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Engine 1: SpotiFLAC (subprocess via thread executor)
-# ═══════════════════════════════════════════════════════════════════════
-
-def _find_spotiflac_binary() -> Optional[str]:
-    """Find the spotiflac executable, searching PATH and pip scripts dirs."""
-    for name in ("spotiflac", "spotiflac.exe"):
-        path = shutil.which(name)
-        if path:
-            return path
-    # Check Python Scripts directory (pip install location on Windows)
-    scripts_dir = os.path.join(os.path.dirname(sys.executable), "Scripts")
-    for name in ("spotiflac", "spotiflac.exe"):
-        full = os.path.join(scripts_dir, name)
-        if os.path.isfile(full):
-            return full
-    # Check user-site scripts directory
-    try:
-        import site
-        user_scripts = os.path.join(site.getusersitepackages().replace("site-packages", "Scripts"))
-        for name in ("spotiflac", "spotiflac.exe"):
-            full = os.path.join(user_scripts, name)
-            if os.path.isfile(full):
-                return full
-    except Exception:
-        pass
-    return None
-
-
-def _build_spotiflac_cmd(req: DownloadRequest, temp_dir: str) -> list[str]:
-    """Build the SpotiFLAC command."""
-    binary = _find_spotiflac_binary()
-    if binary:
-        cmd = [binary]
-    else:
-        cmd = [sys.executable, "-m", "spotiflac"]
-    cmd.extend([str(req.url), temp_dir])
-    if req.services:
-        cmd.extend(["--service", *req.services])
-    if req.quality:
-        cmd.extend(["--quality", req.quality])
-    return cmd
-
-
-async def download_spotiflac(
-    req: DownloadRequest,
-    on_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
-) -> Optional[str]:
-    """Download via SpotiFLAC subprocess (runs in thread executor to avoid
-    Windows asyncio event-loop incompatibility).
-    """
-    if not is_spotiflac_available():
-        msg = "SpotiFLAC not available. Install with: pip install spotiflac"
-        logger.error(msg)
-        if on_progress:
-            await on_progress("failed", msg)
-        return None
-
-    temp_dir = tempfile.mkdtemp(prefix="spotiflac_", dir=settings.DOWNLOAD_DIR)
-    cmd_args = _build_spotiflac_cmd(req, temp_dir)
-    timeout = req.timeout_s if req.timeout_s and req.timeout_s >= 30 else 600
-
-    try:
-        if on_progress:
-            await on_progress("downloading", "Starting SpotiFLAC download...")
-
-        def _run():
-            proc = subprocess.Popen(
-                cmd_args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = proc.communicate(timeout=float(timeout))
-                return proc.returncode, stdout, stderr
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                return None, None, None
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _run)
-
-        if result[0] is None:
-            # Timeout
-            logger.error(f"SpotiFLAC timed out after {timeout}s for {req.url}")
-            if on_progress:
-                await on_progress("failed", f"Download timed out after {timeout}s")
-            _cleanup_dir(temp_dir)
-            return None
-
-        returncode, stdout, stderr = result
-
-        if returncode != 0:
-            err_msg = (stderr.decode(errors="replace") or stdout.decode(errors="replace")).strip()[:200] or "Unknown error"
-            logger.error(f"SpotiFLAC failed (exit {returncode}) for {req.url}: {err_msg}")
-            if on_progress:
-                await on_progress("failed", err_msg)
-            _cleanup_dir(temp_dir)
-            return None
-
-        if on_progress:
-            await on_progress("processing", "Processing downloaded file...")
-
-        audio_path = _find_audio_in_dir(temp_dir)
-        if not audio_path:
-            if on_progress:
-                await on_progress("failed", "Download completed but no audio file found")
-            logger.error(f"No audio file found after SpotiFLAC for {req.url}")
-            _cleanup_dir(temp_dir)
-            return None
-
-        rel_path = _move_to_downloads(audio_path)
-        if not rel_path:
-            if on_progress:
-                await on_progress("failed", "Failed to move downloaded file")
-            _cleanup_dir(temp_dir)
-            return None
-
-        abs_path = os.path.join(settings.DOWNLOAD_DIR, rel_path)
-        final_filename = await _process_metadata_for_file(
-            abs_path, str(req.url), on_progress,
-            artist_hint=req.artist, title_hint=req.title,
-        )
-
-        if on_progress:
-            await on_progress("complete", final_filename)
-        logger.info(f"SpotiFLAC download complete: {req.url} -> {final_filename}")
-        return final_filename
-
-    except Exception as e:
-        logger.error(f"SpotiFLAC download error: {type(e).__name__}: {e}")
-        if on_progress:
-            await on_progress("failed", f"{type(e).__name__}: {e}")
-        _cleanup_dir(temp_dir)
-        return None
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# Engine 2: yt-dlp (searches YouTube, downloads best audio)
+# Engine 1: yt-dlp (searches YouTube, downloads best audio)
 # ═══════════════════════════════════════════════════════════════════════
 
 async def download_ytdlp(
@@ -993,7 +932,7 @@ def _find_newest_audio() -> Optional[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Engine 3: SpotDL (subprocess via thread executor)
+# Engine 2: SpotDL (subprocess via thread executor)
 # ═══════════════════════════════════════════════════════════════════════
 
 def _build_spotdl_cmd(req: DownloadRequest, temp_dir: str) -> list[str]:
@@ -1170,7 +1109,7 @@ async def run_download(
         engine = available[0]
         logger.warning(f"Preferred downloader '{preferred}' not available, using '{engine}'")
     else:
-        msg = "No downloader available. Install spotiflac, yt-dlp, or spotdl."
+        msg = "No downloader available. Install yt-dlp or spotdl."
         logger.error(msg)
         if on_progress:
             await on_progress("failed", msg)
@@ -1178,9 +1117,7 @@ async def run_download(
 
     logger.info(f"Using downloader: {engine}")
 
-    if engine == "spotiflac":
-        return await download_spotiflac(req, on_progress)
-    elif engine == "ytdlp":
+    if engine == "ytdlp":
         return await download_ytdlp(req, on_progress)
     elif engine == "spotdl":
         return await download_spotdl(req, on_progress)

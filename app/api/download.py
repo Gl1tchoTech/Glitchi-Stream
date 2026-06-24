@@ -10,6 +10,9 @@ from app.services.downloader_service import (
     run_download,
     log_downloaded_files,
     get_available_downloaders,
+    fetch_playlist_tracks,
+    extract_playlist_id,
+    is_playlist_url,
 )
 from app.services.file_service import get_downloaded_files
 from app.services.download_task_manager import task_manager
@@ -166,4 +169,59 @@ async def available_downloaders():
     return {
         "available": get_available_downloaders(),
         "current": settings.DEFAULT_DOWNLOADER,
+    }
+
+
+# ── Playlist batch download ──────────────────────────────────────
+
+@router.post("/playlist-preview")
+async def preview_playlist(req: DownloadRequest):
+    """Fetch all tracks from a Spotify playlist URL."""
+    url = str(req.url)
+    if not is_spotify_url(url):
+        raise HTTPException(status_code=400, detail="Not a valid Spotify URL")
+    if not is_playlist_url(url):
+        raise HTTPException(status_code=400, detail="Not a Spotify playlist URL")
+
+    tracks = await fetch_playlist_tracks(url)
+    return {
+        "playlist_id": extract_playlist_id(url),
+        "track_count": len(tracks),
+        "tracks": tracks,
+    }
+
+
+@router.post("/playlist-batch")
+async def download_playlist_batch(req: DownloadRequest):
+    """Start batch download for all tracks in a playlist."""
+    url = str(req.url)
+    if not is_spotify_url(url):
+        raise HTTPException(status_code=400, detail="Not a valid Spotify URL")
+    if not is_playlist_url(url):
+        raise HTTPException(status_code=400, detail="Not a Spotify playlist URL")
+
+    tracks = await fetch_playlist_tracks(url)
+    if not tracks:
+        raise HTTPException(status_code=404, detail="No tracks found in playlist")
+
+    # Create tasks for each track
+    task_ids = []
+    for track in tracks:
+        if not track.get("url"):
+            continue
+        track_req = DownloadRequest(
+            url=track["url"],
+            quality=req.quality,
+            downloader=req.downloader,
+            artist=track.get("artists", ""),
+            title=track.get("name", ""),
+        )
+        task = task_manager.create_task(track["url"])
+        task_ids.append(task.task_id)
+        asyncio.create_task(_run_download_task(task.task_id, track_req))
+
+    return {
+        "message": f"Started downloading {len(task_ids)} tracks",
+        "task_ids": task_ids,
+        "total": len(task_ids),
     }
