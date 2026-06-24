@@ -3,14 +3,10 @@ const state = {
     activeTab: 'browse',
     theme: localStorage.getItem('glitchi-theme') || 'dark',
     searchTimeout: null,
-    devMode: localStorage.getItem('glitchi-dev') === 'true',
-    debugMode: localStorage.getItem('glitchi-debug') === 'true',
-    showApiLog: localStorage.getItem('glitchi-api-log') === 'true',
     defaultQuality: localStorage.getItem('glitchi-quality') || 'LOSSLESS',
     defaultDownloader: localStorage.getItem('glitchi-downloader') || 'ytdlp',
     playlists: JSON.parse(localStorage.getItem('glitchi-playlists') || '[]'),
     downloadedFiles: JSON.parse(localStorage.getItem('glitchi-downloaded-files') || '[]'),
-    searchHistory: JSON.parse(localStorage.getItem('glitchi-search-history') || '[]'),
     listeningHistory: JSON.parse(localStorage.getItem('glitchi-listening-history') || '{"streams":[],"downloads":[],"genreClicks":[],"searches":[]}'),
     detailItem: null,
     currentAudio: null,
@@ -25,18 +21,7 @@ const state = {
 };
 
 // ===== Logger (dev mode) =====
-const devLogs = [];
-function devLog(msg, data) {
-    const ts = new Date().toISOString().split('T')[1].slice(0, 12);
-    const entry = `[${ts}] ${msg}` + (data !== undefined ? ' ' + JSON.stringify(data) : '');
-    devLogs.push(entry);
-    if (devLogs.length > 200) devLogs.shift();
-    if (state.devMode) {
-        const el = document.getElementById('dev-logs-content');
-        if (el) el.textContent = devLogs.slice(-50).join('\n');
-    }
-    if (state.debugMode) console.log('[Glitchi]', msg, data);
-}
+function devLog(msg, data) { /* no-op: dev options removed */ }
 
 // ===== Device Detection =====
 function detectDevice() {
@@ -79,7 +64,6 @@ document.addEventListener('DOMContentLoaded', () => {
     setupModals();
     setupSettings();
     setupPlaylists();
-    setupSearchHistory();
     setupNowPlaying();
     fetchAvailableDownloaders();
     preloadBrowse();  // preload browse content immediately
@@ -90,8 +74,6 @@ document.addEventListener('DOMContentLoaded', () => {
     state._pollWorker = new Worker('/static/download-poll-worker.js');
     state._pollWorker.onmessage = _handleWorkerMessage;
     resumeActiveDownloads();
-    if (state.devMode) unlockDevUI();
-    devLog('App initialized', { theme: state.theme, devMode: state.devMode });
 });
 
 // ===== Theme =====
@@ -517,8 +499,6 @@ function setupSearch() {
     let debounceTimer;
     input.addEventListener('input', () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 400); });
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(debounceTimer); doSearch(); } });
-    input.addEventListener('focus', showSearchHistory);
-    input.addEventListener('blur', () => setTimeout(() => { document.getElementById('search-history').style.display = 'none'; }, 200));
 }
 
 function getActiveTypes() {
@@ -540,61 +520,20 @@ async function doSearch() {
         resultsEl.innerHTML = `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" class="empty-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><p>Search for music to get started</p></div>`;
         return;
     }
-    addSearchHistory(query);
+    trackSearch(query);
     devLog('Searching', { query });
     resultsEl.innerHTML = '<div class="spinner"></div>';
     const types = getActiveTypes();
     const url = `/search/?q=${encodeURIComponent(query)}&type=${encodeURIComponent(types)}&limit=20`;
     try {
         const res = await fetch(url);
-        if (state.showApiLog) devLog('API Response', { status: res.status, url });
         if (!res.ok) { const err = await res.json().catch(() => ({ detail: 'Search failed' })); throw new Error(err.detail || 'Search failed'); }
         const data = await res.json();
-        if (state.showApiLog) devLog('Search results', { tracks: data.tracks?.length, albums: data.albums?.length, artists: data.artists?.length, playlists: data.playlists?.length });
         renderSearchResults(data, query);
     } catch (e) {
         devLog('Search error', { error: e.message });
         resultsEl.innerHTML = `<div class="empty-state"><p style="color:#ef4444">${escapeHtml(e.message)}</p></div>`;
     }
-}
-
-// ===== Search History =====
-function setupSearchHistory() {
-    document.getElementById('search-history').addEventListener('click', (e) => {
-        const removeBtn = e.target.closest('.history-remove');
-        if (removeBtn) { e.stopPropagation(); removeSearchHistory(removeBtn.dataset.query); showSearchHistory(); return; }
-        const clearBtn = e.target.closest('.history-clear');
-        if (clearBtn) { e.stopPropagation(); clearSearchHistory(); return; }
-        const item = e.target.closest('.search-history-item');
-        if (item) { document.getElementById('search-input').value = item.dataset.query || item.textContent; document.getElementById('search-history').style.display = 'none'; doSearch(); }
-    });
-}
-
-function addSearchHistory(query) {
-    state.searchHistory = state.searchHistory.filter(q => q !== query);
-    state.searchHistory.unshift(query);
-    if (state.searchHistory.length > 20) state.searchHistory.pop();
-    localStorage.setItem('glitchi-search-history', JSON.stringify(state.searchHistory));
-    trackSearch(query);
-}
-
-function removeSearchHistory(query) {
-    state.searchHistory = state.searchHistory.filter(q => q !== query);
-    localStorage.setItem('glitchi-search-history', JSON.stringify(state.searchHistory));
-}
-
-function clearSearchHistory() {
-    state.searchHistory = [];
-    localStorage.setItem('glitchi-search-history', '[]');
-    document.getElementById('search-history').style.display = 'none';
-}
-
-function showSearchHistory() {
-    const el = document.getElementById('search-history');
-    if (state.searchHistory.length === 0) { el.style.display = 'none'; return; }
-    el.innerHTML = state.searchHistory.map(q => `<div class="search-history-item" data-query="${escapeHtml(q)}"><span class="history-text">${escapeHtml(q)}</span><button type="button" class="history-remove" data-query="${escapeHtml(q)}" title="Remove">&times;</button></div>`).join('')
-        + '<div class="history-clear">Clear all history</div>';
-    el.style.display = 'block';
 }
 
 // ===== Event delegation for result cards =====
@@ -773,44 +712,22 @@ function setupSettings() {
         devLog('Downloader changed', { downloader: e.target.value });
         showToast(`Download engine: ${e.target.value}`, 'info');
     });
-    document.getElementById('btn-dev-unlock').addEventListener('click', () => {
-        const key = document.getElementById('dev-key-input').value.trim();
-        if (key === state.adminKey) {
-            state.devMode = true;
-            localStorage.setItem('glitchi-dev', 'true');
-            unlockDevUI();
-            showToast('Dev mode unlocked! 🔓', 'success');
-            devLog('Dev mode activated');
-        } else { showToast('Invalid admin key', 'error'); }
-    });
-    document.getElementById('toggle-logs').addEventListener('change', function() { document.getElementById('dev-logs').style.display = this.checked ? 'block' : 'none'; });
-    document.getElementById('toggle-debug').addEventListener('change', function() { state.debugMode = this.checked; localStorage.setItem('glitchi-debug', this.checked ? 'true' : 'false'); });
-    document.getElementById('toggle-api-log').addEventListener('change', function() { state.showApiLog = this.checked; localStorage.setItem('glitchi-api-log', this.checked ? 'true' : 'false'); });
     document.getElementById('btn-clear-storage').addEventListener('click', () => {
         if (confirm('Clear ALL local data?')) {
             localStorage.clear();
-            state.playlists = []; state.downloadedFiles = []; state.searchHistory = []; state.devMode = false; state.debugMode = false; state.showApiLog = false;
+            state.playlists = []; state.downloadedFiles = [];
             showToast('All local data cleared', 'info');
-            document.getElementById('dev-section').style.display = 'none';
             renderPlaylists(); loadFiles();
         }
     });
     document.getElementById('btn-export-data').addEventListener('click', () => {
-        const data = { playlists: state.playlists, downloadedFiles: state.downloadedFiles, searchHistory: state.searchHistory, theme: state.theme, quality: state.defaultQuality };
+        const data = { playlists: state.playlists, downloadedFiles: state.downloadedFiles, theme: state.theme, quality: state.defaultQuality };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'glitchi-data.json'; a.click();
         showToast('Data exported!', 'success');
     });
 }
 
-function unlockDevUI() {
-    document.getElementById('dev-section').style.display = 'block';
-    document.getElementById('toggle-debug').checked = state.debugMode;
-    document.getElementById('toggle-api-log').checked = state.showApiLog;
-    document.getElementById('dev-logs').style.display = document.getElementById('toggle-logs').checked ? 'block' : 'none';
-    const logsEl = document.getElementById('dev-logs-content');
-    if (logsEl) logsEl.textContent = devLogs.slice(-50).join('\n');
-}
 
 // ===== Files =====
 function loadFiles() { renderLocalFiles(); }

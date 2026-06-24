@@ -134,7 +134,6 @@
                             <button class="filter-chip" data-filter="artist">Artists</button>
                             <button class="filter-chip" data-filter="playlist">Playlists</button>
                         </div>
-                        <div class="search-history" id="search-history" style="display:none"></div>
                     </div>
                 </div>
                 <div id="search-results" class="search-results">
@@ -444,35 +443,8 @@
                     <option value="MEDIUM">MP3 160kbps (.mp3)</option>
                 </select>
             </div>
-            <div class="settings-section">
-                <h3>Dev Options</h3>
-                <p class="settings-hint">Enter the admin key to unlock developer tools</p>
-                <div style="display:flex;gap:8px">
-                    <input type="password" id="dev-key-input" class="input-field" placeholder="Admin key..." style="flex:1">
-                    <button class="btn-primary btn-sm" id="btn-dev-unlock">Unlock</button>
-                </div>
-            </div>
-            <div class="settings-section dev-section" id="dev-section" style="display:none">
-                <h3>🔧 Developer Tools</h3>
-                <label class="toggle-row">
-                    <span>Show Logs</span>
-                    <input type="checkbox" id="toggle-logs">
-                </label>
-                <label class="toggle-row">
-                    <span>Debug Mode</span>
-                    <input type="checkbox" id="toggle-debug">
-                </label>
-                <label class="toggle-row">
-                    <span>Show API Responses</span>
-                    <input type="checkbox" id="toggle-api-log">
-                </label>
-                <button class="btn-secondary btn-sm" id="btn-clear-storage" style="margin-top:12px">Clear All Local Data</button>
-                <button class="btn-secondary btn-sm" id="btn-export-data" style="margin-top:4px">Export Data as JSON</button>
-                <div id="dev-logs" class="dev-logs" style="display:none">
-                    <h4>Logs</h4>
-                    <div id="dev-logs-content"></div>
-                </div>
-            </div>
+            <button class="btn-secondary btn-sm" id="btn-clear-storage" style="margin-top:12px">Clear All Local Data</button>
+            <button class="btn-secondary btn-sm" id="btn-export-data" style="margin-top:4px">Export Data as JSON</button>
         </div>
     </div>
 
