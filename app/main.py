@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.config import settings
-from app.api import download, file, health, search, docs, playlists, stream, browse
+from app.api import download, file, health, search, docs, playlists, browse
 from app.services.cleanup_service import start_cleanup_task
 from app.services.download_task_manager import task_manager
 from app.utils.logger import logger
@@ -23,7 +23,7 @@ app.include_router(file.router)
 app.include_router(search.router)
 app.include_router(docs.router)
 app.include_router(playlists.router)
-app.include_router(stream.router)
+
 app.include_router(browse.router)
 
 # Serve static files (CSS, JS, images)

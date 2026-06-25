@@ -29,13 +29,13 @@
                         <circle cx="16" cy="16" r="5" fill="currentColor"/>
                         <path d="M16 2v6M16 24v6M2 16h6M24 16h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                     </svg>
-                    <span>Glitchi</span>
+                    <span>Glitchi Stream</span>
                 </div>
             </div>
             <nav class="sidebar-nav" id="sidebar-nav">
-                <button class="nav-item active" data-tab="browse">
-                    <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/></svg>
-                    <span>Browse</span>
+                <button class="nav-item active" data-tab="home">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 22V12h6v10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span>Home</span>
                 </button>
                 <button class="nav-item" data-tab="search">
                     <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -83,40 +83,77 @@
 
         <!-- ===== Main Content ===== -->
         <main class="main-content" id="main-content">
-            <!-- Browse Tab (Song Browser) -->
-            <section id="tab-browse" class="tab-content active">
-                <div class="browse-hero">
-                    <h1>Discover</h1>
-                    <p class="browse-subtitle">Explore music by genre, mood, or what's trending</p>
+            <!-- Home Tab -->
+            <section id="tab-home" class="tab-content active">
+                <div class="home-hero">
+                    <div class="home-logo">
+                        <svg viewBox="0 0 32 32" fill="none" class="home-logo-icon">
+                            <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="2.5"/>
+                            <circle cx="16" cy="16" r="5" fill="currentColor"/>
+                            <path d="M16 2v6M16 24v6M2 16h6M24 16h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </div>
+                    <h1 class="home-title">Glitchi-Stream</h1>
+                    <p class="home-desc">A modern Spotify downloader — download tracks in MP3, create playlists, play local files, and explore music across 18 themes.</p>
                 </div>
-                <!-- Genre filter chips -->
-                <div class="browse-filters" id="browse-filters">
-                    <button class="genre-chip active" data-genre="">All</button>
-                    <div class="browse-filters-scroll" id="browse-filters-scroll"></div>
+
+                <!-- ===== Update Info ===== -->
+                <div class="home-update">
+                    <div class="home-update-badge">
+                        <span class="home-version">v2.0.0</span>
+                        <span class="home-date">June 24, 2026</span>
+                    </div>
+                    <h2 class="home-update-title">Glitchi-Stream v2.0 — Mobile, Speed &amp; Polish</h2>
+                    <ul class="home-changelog">
+                        <li>Mobile UI redesigned — Bottom tab bar with glowing active indicator, floating mini-player with accent-colored play button, touch-optimized cards with :active scale feedback, 2-column search grid, larger tap targets (44px+) throughout, safe-area insets for notched phones</li>
+                        <li>Browse tab replaced with Home tab — docs-style landing page with Glitchi-Stream title, version badge, full changelog, and editable DEV notes section</li>
+                        <li>Playlist download now auto-zips and delivers to device — batch playlist downloads collect all completed filenames into a ZIP and trigger browser download automatically</li>
+                        <li>Web Worker polling — download progress runs in a dedicated thread, never throttled when browser tab is hidden; all setInterval/setTimeout replaced with worker-driven events</li>
+                        <li>Playlist bugs fixed — openPlaylistView classList mismatch (close button now works), smarter local file matching (artist + track name word overlap), clear toast when tracks aren't downloaded yet</li>
+                        <li>Search speed doubled — debounce reduced from 400ms to 250ms, client-side result cache with 60s TTL and 50-entry limit for instant repeat searches</li>
+                        <li>Playlist track count bug fixed — fetch_playlist_tracks now uses spotapi.playlist.PublicPlaylist.paginate_playlist() instead of the non-existent song.get_playlist() that was falling through to a random search query</li>
+                        <li>8-second timeout on SpotAPI calls — page still loads if SpotAPI is slow or unreachable</li>
+                        <li>18-theme system preserved across all pages with smooth CSS custom property transitions</li>
+                        <li>Spotify track/album/artist detail preview with download + add-to-playlist actions</li>
+                        <li>All dead CSS purged — removed browse-specific rules after Home tab migration</li>
+                    </ul>
                 </div>
-                <!-- Browse content area (shows Featured/New/Trending or filtered results) -->
-                <div id="browse-content">
-                    <div class="browse-section hidden" id="browse-for-you-section">
-                        <h2 class="section-title">For You</h2>
-                        <div class="h-scroll" id="browse-for-you"></div>
+
+                <!-- ===== DEV Notes ===== -->
+                <div class="home-devnotes">
+                    <h2 class="section-title">📝 DEV Notes</h2>
+                    <div class="home-devnotes-content">
+                        <h3>Current Architecture</h3>
+                        <p><strong>Backend:</strong> FastAPI with SpotAPI for Spotify metadata — no API keys required</p>
+                        <p><strong>Downloads:</strong> yt-dlp / SpotDL via asyncio subprocess, task-based progress tracking with semaphore (max 3 concurrent), always MP3 320kbps</p>
+                        <p><strong>Playback:</strong> Local file playback via browser Audio element</p>
+                        <p><strong>Frontend:</strong> Vanilla JS, no framework, no build step — static files served directly</p>
+                        <p><strong>Themes:</strong> 18 CSS custom property themes with data-theme attribute switching</p>
+                        <p><strong>Worker:</strong> Web Worker polls /download/progress every 1s in a separate thread</p>
+
+                        <h4>Key Files</h4>
+                        <p><code>app/main.py</code> — FastAPI entry point, routers, static mount</p>
+                        <p><code>app/api/</code> — Download, search, playlists, browse endpoints</p>
+                        <p><code>app/services/</code> — SpotiFLAC/yt-dlp/SpotDL download logic, search, task manager</p>
+                        <p><code>static/app.js</code> — Entire frontend (routing, search, downloads, playlists, themes)</p>
+                        <p><code>static/styles.css</code> — All 18 theme definitions + responsive layout</p>
+                        <p><code>static/index.html</code> — SPA shell (sidebar, tabs, modals, mini-player)</p>
+                        <p><code>static/download-poll-worker.js</code> — Web Worker for background-safe download progress</p>
+
+                        <h3>Known Issues</h3>
+                        <p>None reported</p>
+
+                        <h3>Upcoming</h3>
+                        <ul>
+                            <li>Queue system for sequential downloads</li>
+                            <li>Equalizer in Now Playing sheet</li>
+                            <li>Offline PWA support with Service Worker</li>
+                            <li>Shuffle/repeat functionality in Now Playing</li>
+                            <li>Pull-to-refresh on mobile</li>
+                        </ul>
+
+                        <p class="home-devnotes-hint" style="margin-top:16px">I spent a lot of time on this — please enjoy! ❤️ by Glitch -_-</p>
                     </div>
-                    <div class="browse-section" id="browse-featured-section">
-                        <h2 class="section-title">Featured</h2>
-                        <div class="h-scroll" id="browse-featured"></div>
-                    </div>
-                    <div class="browse-section" id="browse-new-section">
-                        <h2 class="section-title">New Releases</h2>
-                        <div class="h-scroll" id="browse-new-releases"></div>
-                    </div>
-                    <div class="browse-section" id="browse-trending-section">
-                        <h2 class="section-title">Trending Now</h2>
-                        <div class="h-scroll" id="browse-trending"></div>
-                    </div>
-                </div>
-                <!-- Filtered results (shown when a genre chip is active) -->
-                <div id="browse-filtered" class="hidden">
-                    <h2 class="section-title" id="browse-filtered-title"></h2>
-                    <div id="browse-filtered-content"></div>
                 </div>
             </section>
 
@@ -201,12 +238,7 @@
                         <input type="url" id="download-url" placeholder="https://open.spotify.com/track/..." class="input-field">
                     </div>
                     <div class="form-group">
-                        <label>Quality</label>
-                        <select id="download-quality" class="input-field">
-                            <option value="LOSSLESS">FLAC (.flac)</option>
-                            <option value="HIGH">MP3 320kbps (.mp3)</option>
-                            <option value="MEDIUM">MP3 160kbps (.mp3)</option>
-                        </select>
+                        <input type="hidden" id="download-quality" value="HIGH">
                     </div>
                     <button id="btn-download" class="btn-primary">
                         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -315,21 +347,15 @@
                     </button>
                     <input type="range" class="volume-slider" id="player-volume-slider" min="0" max="100" value="80">
                 </div>
-                <!-- Action buttons -->
-                <div class="np-actions">
-                    <button class="btn-accent" id="btn-now-download" style="display:none">
-                        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                        Download
-                    </button>
-                </div>
             </div>
+
         </div>
 
         <!-- ===== Mobile Tab Bar ===== -->
         <nav class="mobile-tab-bar" id="mobile-tab-bar">
-            <button class="mobile-tab active" data-tab="browse">
-                <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="14" y="3" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="3" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/><rect x="14" y="14" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="2"/></svg>
-                <span>Browse</span>
+            <button class="mobile-tab active" data-tab="home">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 22V12h6v10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                <span>Home</span>
             </button>
             <button class="mobile-tab" data-tab="search">
                 <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -370,10 +396,6 @@
                     <button class="preview-btn primary" id="btn-detail-download">
                         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                         <span>Download</span>
-                    </button>
-                    <button class="preview-btn accent" id="btn-detail-stream">
-                        <svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg>
-                        <span>Stream</span>
                     </button>
                     <button class="preview-btn secondary" id="btn-detail-add-playlist">
                         <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
@@ -435,14 +457,7 @@
                     <option value="spotdl">SpotDL (Spotify → YouTube)</option>
                 </select>
             </div>
-            <div class="settings-section">
-                <h3>Default Download Quality</h3>
-                <select id="settings-quality" class="input-field">
-                    <option value="LOSSLESS">FLAC (.flac)</option>
-                    <option value="HIGH">MP3 320kbps (.mp3)</option>
-                    <option value="MEDIUM">MP3 160kbps (.mp3)</option>
-                </select>
-            </div>
+
             <button class="btn-secondary btn-sm" id="btn-clear-storage" style="margin-top:12px">Clear All Local Data</button>
             <button class="btn-secondary btn-sm" id="btn-export-data" style="margin-top:4px">Export Data as JSON</button>
         </div>

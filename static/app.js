@@ -1,9 +1,8 @@
 // ===== State =====
 const state = {
-    activeTab: 'browse',
+    activeTab: 'home',
     theme: localStorage.getItem('glitchi-theme') || 'dark',
     searchTimeout: null,
-    defaultQuality: localStorage.getItem('glitchi-quality') || 'LOSSLESS',
     defaultDownloader: localStorage.getItem('glitchi-downloader') || 'ytdlp',
     playlists: JSON.parse(localStorage.getItem('glitchi-playlists') || '[]'),
     downloadedFiles: JSON.parse(localStorage.getItem('glitchi-downloaded-files') || '[]'),
@@ -12,7 +11,6 @@ const state = {
     currentAudio: null,
     playerTrack: null,
     librarySegment: 'files',     // 'files' | 'playlists'
-    browseCategories: [],       // loaded from API
     nowPlayingOpen: false,
     _downloadStartTime: null,       // for ETA calculation
     _downloadTotalTracks: 0,       // for playlist batch progress
@@ -49,10 +47,8 @@ document.addEventListener('DOMContentLoaded', () => {
     detectDevice();
     applyTheme(state.theme);
     document.getElementById('settings-theme').value = state.theme;
-    document.getElementById('settings-quality').value = state.defaultQuality;
     document.getElementById('settings-downloader').value = state.defaultDownloader;
     setupNavigation();
-    setupBrowse();
     setupSearch();
     setupLibrary();
     setupFiles();
@@ -66,7 +62,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupPlaylists();
     setupNowPlaying();
     fetchAvailableDownloaders();
-    preloadBrowse();  // preload browse content immediately
+    loadHomePage();  // fetch dev-notes.json and render home tab
     openTab(state.activeTab);
     loadFiles();
     renderPlaylists();
@@ -104,32 +100,19 @@ function openTab(name) {
     document.querySelectorAll('.mobile-tab[data-tab]').forEach(i => i.classList.toggle('active', i.dataset.tab === name));
     // Show/hide tab content
     document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === `tab-${name}`));
-    if (name === 'browse') refreshBrowseIfStale();
+    if (name === 'home') loadHomePage();
     if (name === 'search') document.getElementById('search-input')?.focus();
     if (name === 'library') { loadFiles(); renderPlaylists(); }
-    if (name === 'download') {
-        const sel = document.getElementById('download-quality');
-        if (sel) sel.value = state.defaultQuality;
-    }
 }
 
-// ===== Browse Tab =====
-let _pendingGenreRequest = null;
-let _browseLastLoaded = 0;  // timestamp of last load for staleness check
-
-function preloadBrowse() {
-    devLog('Preloading browse content...');
-    loadBrowseContent();
+// ===== Home Tab =====
+// Content is hardcoded in index.html — renders instantly with zero JS or API calls.
+// Edit static/index.html to update the version, changelog, or DEV notes.
+function loadHomePage() {
+    // No-op: content is static HTML
 }
 
-function refreshBrowseIfStale() {
-    // Refresh if more than 5 minutes since last load
-    if (Date.now() - _browseLastLoaded > 300000) {
-        loadBrowseContent();
-    }
-}
-
-// ===== Listening History (for Browse personalization) =====
+// ===== Listening History =====
 function saveListeningHistory() {
     localStorage.setItem('glitchi-listening-history', JSON.stringify(state.listeningHistory));
 }
@@ -177,282 +160,6 @@ function trackDownload(artist, title) {
     saveListeningHistory();
 }
 
-function personalizeCategories(categories) {
-    const genreClicks = (state.listeningHistory.genreClicks || []).sort((a, b) => b.lastAt - a.lastAt);
-    if (genreClicks.length === 0) return categories;
-    
-    // Reorder: put recently/frequently clicked genres first
-    const clickedIds = new Set(genreClicks.map(g => g.id));
-    const prioritized = categories.filter(c => clickedIds.has(c.id));
-    const rest = categories.filter(c => !clickedIds.has(c.id));
-    
-    // Sort prioritized by recency
-    const orderMap = {};
-    genreClicks.forEach((g, i) => { orderMap[g.id] = i; });
-    prioritized.sort((a, b) => (orderMap[a.id] || 99) - (orderMap[b.id] || 99));
-    
-    return [...prioritized, ...rest];
-}
-
-async function fetchPersonalized(topGenreIds) {
-    const section = document.getElementById('browse-for-you-section');
-    const container = document.getElementById('browse-for-you');
-    try {
-        const params = new URLSearchParams();
-        topGenreIds.forEach(id => params.append('cats', id));
-        params.append('limit', '12');
-        const res = await fetch(`/browse/personalized?${params.toString()}`);
-        if (!res.ok) throw new Error('Failed');
-        const data = await res.json();
-        const items = [...(data.playlists || []), ...(data.tracks || [])].slice(0, 12);
-        if (items.length > 0) {
-            section.classList.remove('hidden');
-            renderHScrollCards(container, items, 'playlist');
-        } else {
-            section.classList.add('hidden');
-        }
-    } catch (e) {
-        section.classList.add('hidden');
-    }
-}
-
-function setupBrowse() {
-    // Event delegation for cards rendered in browse filtered results
-    document.getElementById('browse-filtered-content').addEventListener('click', handleBrowseCardClick);
-}
-
-function handleBrowseCardClick(e) {
-    const card = e.target.closest('.card, .artist-item');
-    if (!card) return;
-    if (e.target.closest('.track-dl')) return;
-    const itemType = card.dataset.type;
-    const url = card.dataset.url;
-    const id = card.dataset.id || url?.split('/').pop();
-    const name = card.dataset.title || card.querySelector('.card-title')?.textContent || '';
-    const artists = card.dataset.artist || card.querySelector('.card-subtitle')?.textContent || '';
-    const cover = card.dataset.cover || card.querySelector('.card-cover')?.src || '';
-    const tracksCount = card.dataset.tracks || '';
-    openDetailView({ type: itemType, id, name, artists, cover, url, tracksCount });
-}
-
-async function loadBrowseContent() {
-    const categories = await fetchCategories();
-    // Personalize: reorder genre chips based on listening history
-    const personalized = personalizeCategories(categories);
-    renderGenreChips(personalized);
-    
-    // Load For You section if user has history
-    const forYouSection = document.getElementById('browse-for-you-section');
-    const history = state.listeningHistory;
-    const topGenres = (history.genreClicks || []).slice(0, 3);
-    if (topGenres.length > 0) {
-        fetchPersonalized(topGenres.map(g => g.id));
-    } else {
-        forYouSection.classList.add('hidden');
-    }
-
-    await Promise.all([
-        fetchFeatured(),
-        fetchNewReleases(),
-        fetchTrending(),
-    ]);
-    _browseLastLoaded = Date.now();
-}
-
-async function fetchCategories() {
-    try {
-        const res = await fetch('/browse/categories');
-        if (!res.ok) throw new Error('Failed to load categories');
-        const data = await res.json();
-        state.browseCategories = data.categories || [];
-        return state.browseCategories;
-    } catch (e) {
-        devLog('Browse categories error', { error: e.message });
-        return [];
-    }
-}
-
-function renderGenreChips(categories) {
-    const scroll = document.getElementById('browse-filters-scroll');
-    const html = categories.map(cat =>
-        `<button class="genre-chip" data-genre="${escapeHtml(cat.id)}" style="--genre-color: ${escapeHtml(cat.color)}">${escapeHtml(cat.name)}</button>`
-    ).join('');
-    
-    // Prepend a small indicator for top genres if personalized
-    scroll.innerHTML = html;
-
-    const allChips = document.querySelectorAll('#browse-filters .genre-chip');
-    allChips.forEach(chip => {
-        chip.addEventListener('click', () => {
-            const genre = chip.dataset.genre;
-            allChips.forEach(c => c.classList.toggle('active', c.dataset.genre === genre));
-            if (genre) {
-                trackGenreClick(genre);
-                applyGenreFilter(genre);
-            } else {
-                clearGenreFilter();
-            }
-        });
-    });
-}
-
-async function applyGenreFilter(genreId) {
-    const cat = state.browseCategories.find(c => c.id === genreId);
-    const genreName = cat?.name || genreId;
-    devLog('Genre filter applied', { genreId, genreName });
-
-    // Hide default browse content, show filtered area
-    document.getElementById('browse-content').classList.add('hidden');
-    const filtered = document.getElementById('browse-filtered');
-    filtered.classList.remove('hidden');
-    document.getElementById('browse-filtered-title').textContent = genreName;
-    const content = document.getElementById('browse-filtered-content');
-    content.innerHTML = '<div class="spinner"></div>';
-
-    try {
-        // Race-condition guard: only honor the most recently requested genre
-        const requestId = Symbol();
-        _pendingGenreRequest = requestId;
-        const res = await fetch(`/browse/category/${encodeURIComponent(genreId)}?limit=30`);
-        if (_pendingGenreRequest !== requestId) return; // stale request, discard
-        if (!res.ok) throw new Error('Failed to load');
-        const data = await res.json();
-        let html = '';
-        if (data.playlists && data.playlists.length > 0) {
-            html += '<h3 style="margin-bottom:12px;font-size:15px;color:var(--text-secondary)">Playlists</h3>';
-            html += '<div class="results-grid" style="margin-bottom:24px">';
-            data.playlists.forEach(pl => {
-                const imgHtml = pl.image_url
-                    ? `<img src="${escapeHtml(pl.image_url)}" class="card-cover" loading="lazy" onerror="this.style.display='none'">`
-                    : '<div class="card-cover-placeholder"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>';
-                html += `<div class="card" data-type="playlist" data-id="${escapeHtml(pl.id)}" data-title="${escapeHtml(pl.name)}" data-artist="${escapeHtml(pl.owner)}" data-cover="${escapeHtml(pl.image_url)}" data-url="${escapeHtml(pl.url)}" data-tracks="${pl.tracks_count}">
-                    ${imgHtml}
-                    <div class="card-title">${escapeHtml(pl.name)}</div>
-                    <div class="card-subtitle">By ${escapeHtml(pl.owner)}</div>
-                    <div class="card-meta">${pl.tracks_count} tracks</div>
-                </div>`;
-            });
-            html += '</div>';
-        }
-        if (data.tracks && data.tracks.length > 0) {
-            html += '<h3 style="margin-bottom:12px;font-size:15px;color:var(--text-secondary)">Tracks</h3>';
-            html += '<div class="track-list">';
-            data.tracks.forEach((t, i) => {
-                const img = t.album_image_url ? `<img class="track-cover" src="${escapeHtml(t.album_image_url)}" onerror="this.remove()">` : '';
-                html += `<div class="track-row" data-url="${escapeHtml(t.url)}" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.album_image_url)}">
-                    <span class="track-num">${i+1}</span>
-                    ${img}
-                    <div class="track-info">
-                        <div class="track-name">${escapeHtml(t.name)}</div>
-                        <div class="track-artist">${escapeHtml(t.artists)}</div>
-                    </div>
-                    <span class="track-duration">${formatDuration(t.duration_ms)}</span>
-                    <button class="track-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-                </div>`;
-            });
-            html += '</div>';
-        }
-        if (!data.playlists?.length && !data.tracks?.length) {
-            html = '<p style="color:var(--text-tertiary);padding:16px">No results for this genre</p>';
-        }
-        content.innerHTML = html;
-        // Download handlers for track rows
-        content.querySelectorAll('.track-row').forEach(row => {
-            const dl = row.querySelector('.track-dl');
-            if (dl) dl.addEventListener('click', (e) => {
-                e.stopPropagation();
-                if (row.dataset.url) downloadFromDetail(row.dataset.url, row.dataset.artist, row.dataset.name);
-            });
-            row.addEventListener('click', (e) => {
-                if (e.target.closest('.track-dl')) return;
-                if (row.dataset.url) downloadFromDetail(row.dataset.url, row.dataset.artist, row.dataset.name);
-            });
-        });
-    } catch (e) {
-        devLog('Genre filter error', { genreId, error: e.message });
-        content.innerHTML = '<p style="color:#ef4444;padding:16px">Failed to load</p>';
-    }
-}
-
-function clearGenreFilter() {
-    _pendingGenreRequest = null;
-    document.getElementById('browse-content').classList.remove('hidden');
-    document.getElementById('browse-filtered').classList.add('hidden');
-    document.getElementById('browse-filtered-content').innerHTML = '';
-}
-
-async function fetchFeatured() {
-    const container = document.getElementById('browse-featured');
-    try {
-        const res = await fetch('/browse/featured?limit=12');
-        if (!res.ok) throw new Error('Failed');
-        const data = await res.json();
-        const items = [...(data.playlists || []), ...(data.tracks || [])].slice(0, 12);
-        renderHScrollCards(container, items, 'playlist');
-    } catch (e) {
-        container.innerHTML = '<p style="color:var(--text-tertiary);padding:16px">Failed to load</p>';
-    }
-}
-
-async function fetchNewReleases() {
-    const container = document.getElementById('browse-new-releases');
-    try {
-        const res = await fetch('/browse/new-releases?limit=12');
-        if (!res.ok) throw new Error('Failed');
-        const data = await res.json();
-        const items = [...(data.albums || []), ...(data.tracks || [])].slice(0, 12);
-        renderHScrollCards(container, items, 'album');
-    } catch (e) {
-        container.innerHTML = '<p style="color:var(--text-tertiary);padding:16px">Failed to load</p>';
-    }
-}
-
-async function fetchTrending() {
-    const container = document.getElementById('browse-trending');
-    try {
-        const res = await fetch('/browse/trending?limit=12');
-        if (!res.ok) throw new Error('Failed');
-        const data = await res.json();
-        renderHScrollCards(container, data.tracks || [], 'track');
-    } catch (e) {
-        container.innerHTML = '<p style="color:var(--text-tertiary);padding:16px">Failed to load</p>';
-    }
-}
-
-function renderHScrollCards(container, items, defaultType) {
-    if (!items.length) {
-        container.innerHTML = '<p style="color:var(--text-tertiary);padding:16px">Nothing here yet</p>';
-        return;
-    }
-    container.innerHTML = items.map(item => {
-        const imgUrl = item.image_url || item.album_image_url || '';
-        const title = item.name || '';
-        const subtitle = item.artists || item.owner || item.album || '';
-        const itemType = item.type || defaultType;
-        const imgHtml = imgUrl
-            ? `<img src="${escapeHtml(imgUrl)}" class="h-card-cover" loading="lazy" onerror="this.style.display='none'">`
-            : '<div class="h-card-cover" style="display:flex;align-items:center;justify-content:center;background:var(--bg-cover-placeholder)"><svg viewBox="0 0 24 24" fill="none" style="width:32px;height:32px;color:var(--text-tertiary)"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/></svg></div>';
-        return `<div class="h-card" data-type="${escapeHtml(itemType)}" data-id="${escapeHtml(item.id)}" data-title="${escapeHtml(title)}" data-artist="${escapeHtml(subtitle)}" data-cover="${escapeHtml(imgUrl)}" data-url="${escapeHtml(item.url)}">
-            ${imgHtml}
-            <div class="h-card-title">${escapeHtml(title)}</div>
-            <div class="h-card-subtitle">${escapeHtml(subtitle)}</div>
-        </div>`;
-    }).join('');
-
-    // Click handlers for h-cards → open detail view
-    container.querySelectorAll('.h-card').forEach(card => {
-        card.addEventListener('click', () => {
-            const itemType = card.dataset.type;
-            const url = card.dataset.url;
-            const id = card.dataset.id || url?.split('/').pop();
-            const name = card.dataset.title || '';
-            const artists = card.dataset.artist || '';
-            const cover = card.dataset.cover || '';
-            openDetailView({ type: itemType, id, name, artists, cover, url });
-        });
-    });
-}
-
 // ===== Library Segment Control =====
 function setupLibrary() {
     document.querySelectorAll('#library-segment .segment-btn').forEach(btn => {
@@ -493,11 +200,14 @@ function setupFilterChips() {
     });
 }
 
-// ===== Search =====
+// ===== Search (with client-side cache for instant repeat searches) =====
+let _searchCache = {}; // { queryKey: { data, timestamp } }
+const SEARCH_CACHE_TTL = 60000; // 1 minute
+
 function setupSearch() {
     const input = document.getElementById('search-input');
     let debounceTimer;
-    input.addEventListener('input', () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 400); });
+    input.addEventListener('input', () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 250); });
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(debounceTimer); doSearch(); } });
 }
 
@@ -521,6 +231,16 @@ async function doSearch() {
         return;
     }
     trackSearch(query);
+    
+    // Check cache for instant repeat searches
+    const cacheKey = `${query}|${getActiveTypes()}`;
+    const cached = _searchCache[cacheKey];
+    if (cached && (Date.now() - cached.timestamp) < SEARCH_CACHE_TTL) {
+        devLog('Search cache hit', { query });
+        renderSearchResults(cached.data, query);
+        return;
+    }
+    
     devLog('Searching', { query });
     resultsEl.innerHTML = '<div class="spinner"></div>';
     const types = getActiveTypes();
@@ -529,6 +249,11 @@ async function doSearch() {
         const res = await fetch(url);
         if (!res.ok) { const err = await res.json().catch(() => ({ detail: 'Search failed' })); throw new Error(err.detail || 'Search failed'); }
         const data = await res.json();
+        // Cache the result
+        _searchCache[cacheKey] = { data, timestamp: Date.now() };
+        // Limit cache size
+        const keys = Object.keys(_searchCache);
+        if (keys.length > 50) { delete _searchCache[keys[0]]; }
         renderSearchResults(data, query);
     } catch (e) {
         devLog('Search error', { error: e.message });
@@ -541,14 +266,7 @@ function setupResultCardDelegation() {
     document.getElementById('search-results').addEventListener('click', (e) => {
         const card = e.target.closest('.card, .artist-item');
         if (!card) return;
-        if (e.target.closest('.card-stream')) {
-            const name = card.dataset.title || card.querySelector('.card-title')?.textContent || '';
-            const artists = card.dataset.artist || card.querySelector('.card-subtitle')?.textContent || '';
-            const cover = card.dataset.cover || card.querySelector('.card-cover')?.src || '';
-            const query = `${artists} ${name}`.trim();
-            if (query) streamTrack(query, name, artists, cover);
-            return;
-        }            if (e.target.closest('.card-dl')) {
+        if (e.target.closest('.card-dl')) {
             const url = card.dataset.url;
             const artist = card.dataset.artist || '';
             const title = card.dataset.title || '';
@@ -608,21 +326,14 @@ function openDetailView(item) {
     }
 
     const btnDownload = document.getElementById('btn-detail-download');
-    const btnStream = document.getElementById('btn-detail-stream');
     const btnAddPlaylist = document.getElementById('btn-detail-add-playlist');
     const btnOpenSpotify = document.getElementById('btn-detail-open-spotify');
-    btnDownload.style.display = ''; btnStream.style.display = ''; btnAddPlaylist.style.display = ''; btnOpenSpotify.style.display = '';
-    if (item.type === 'artist') { btnStream.style.display = 'none'; }
-    if (item.type === 'playlist') { btnDownload.style.display = 'none'; btnStream.style.display = 'none'; }
+    btnDownload.style.display = ''; btnAddPlaylist.style.display = ''; btnOpenSpotify.style.display = '';
+    if (item.type === 'playlist') { btnDownload.style.display = 'none'; }
 
     btnDownload.onclick = () => {
         if (item.url) downloadFromDetail(item.url, item.artists, item.name);
         else showToast('No Spotify URL available', 'error');
-    };
-    btnStream.onclick = () => {
-        const query = `${item.artists || ''} ${item.name || ''}`.trim();
-        if (query) streamTrack(query, item.name, item.artists, item.cover);
-        else showToast('No track info to stream', 'error');
     };
     btnAddPlaylist.onclick = () => openPlaylistPicker(item);
     btnOpenSpotify.onclick = () => { if (item.url) window.open(item.url, '_blank'); };
@@ -685,7 +396,6 @@ function setupModals() {
     document.getElementById('btn-settings').addEventListener('click', () => {
         document.getElementById('settings-modal').style.display = 'flex';
         document.getElementById('settings-theme').value = state.theme;
-        document.getElementById('settings-quality').value = state.defaultQuality;
         document.getElementById('settings-downloader').value = state.defaultDownloader;
         fetchAvailableDownloaders();
     });
@@ -702,10 +412,6 @@ function setupModals() {
 // ===== Settings =====
 function setupSettings() {
     document.getElementById('settings-theme').addEventListener('change', (e) => applyTheme(e.target.value));
-    document.getElementById('settings-quality').addEventListener('change', (e) => {
-        state.defaultQuality = e.target.value;
-        localStorage.setItem('glitchi-quality', e.target.value);
-    });
     document.getElementById('settings-downloader').addEventListener('change', (e) => {
         state.defaultDownloader = e.target.value;
         localStorage.setItem('glitchi-downloader', e.target.value);
@@ -721,7 +427,7 @@ function setupSettings() {
         }
     });
     document.getElementById('btn-export-data').addEventListener('click', () => {
-        const data = { playlists: state.playlists, downloadedFiles: state.downloadedFiles, theme: state.theme, quality: state.defaultQuality };
+        const data = { playlists: state.playlists, downloadedFiles: state.downloadedFiles, theme: state.theme };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'glitchi-data.json'; a.click();
         showToast('Data exported!', 'success');
@@ -757,7 +463,7 @@ function renderLocalFiles() {
         return `<div class="file-card"><div class="file-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M9 18V5l12-2v13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="18" cy="16" r="3" fill="currentColor"/></svg></div>
             <div class="file-details"><div class="file-name" title="${escapeHtml(f.filename)}">${escapeHtml(displayName)}</div><div class="file-size">Downloaded ${date}</div></div>
             <div class="file-actions">
-                <button class="file-btn file-btn-stream" data-filename="${escapeHtml(f.filename)}" title="Play"><svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
+                <button class="file-btn file-btn-play" data-filename="${escapeHtml(f.filename)}" title="Play"><svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
                 <button class="file-btn file-btn-download" data-filename="${escapeHtml(f.filename)}" title="Download"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
             </div></div>`;
     }).join('');
@@ -770,17 +476,11 @@ function setupFiles() {
 }
 function setupFileCardDelegation() {
     document.getElementById('files-list').addEventListener('click', (e) => {
-        const streamBtn = e.target.closest('.file-btn-stream');
+        const playBtn = e.target.closest('.file-btn-play');
         const downloadBtn = e.target.closest('.file-btn-download');
-        if (streamBtn) playFile(streamBtn.dataset.filename);
+        if (playBtn) playFile(playBtn.dataset.filename);
         if (downloadBtn) downloadFile(downloadBtn.dataset.filename);
     });
-}
-function playFile(filename) {
-    const rawName = filename.split('/').pop() || filename;
-    let query = rawName.replace(/\.[^.]+$/, '').replace(/_\d{6,}$/, '');
-    devLog('Playing via yt-dlp stream', { filename, query });
-    streamTrack(query, query, 'Local file', null);
 }
 function downloadFile(filename) {
     window.open(`/files/download/${encodeURIComponent(filename)}`, '_blank');
@@ -812,13 +512,6 @@ function setupNowPlaying() {
     document.getElementById('ctrl-volume').addEventListener('click', () => {
         if (state.currentAudio) { state.currentAudio.muted = !state.currentAudio.muted; document.getElementById('ctrl-volume').classList.toggle('active', state.currentAudio.muted); }
     });
-    // Now Playing download button
-    document.getElementById('btn-now-download').addEventListener('click', () => {
-        if (state.playerTrack?.url) {
-            downloadFromDetail(state.playerTrack.url, state.playerTrack.artists, state.playerTrack.name);
-            showToast('Download queued', 'info');
-        }
-    });
 }
 
 function openNowPlaying() {
@@ -840,44 +533,60 @@ function togglePlay() {
     else state.currentAudio.pause();
 }
 
-// ===== Streaming =====
-async function streamTrack(query, name, artists, cover) {
-    devLog('Streaming track', { query, name, artists });
-    if (artists || name) trackStream(artists || '', name || query);
-    if (state.currentAudio) { state.currentAudio.pause(); state.currentAudio.remove(); state.currentAudio = null; }
+async function playFile(filename) {
+    const rawName = filename.split('/').pop() || filename;
+    const displayName = rawName.replace(/\.[^.]+$/, '').replace(/_\d{6,}$/, '');
+    const parts = displayName.split(' - ');
+    const artist = parts.length >= 2 ? parts[0].trim() : '';
+    const title = parts.length >= 2 ? parts.slice(1).join(' - ').trim() : displayName;
+    
+    trackStream(artist, title);
+    
+    // Revoke previous blob URL to prevent memory leaks
+    if (state.currentAudio) {
+        const oldSrc = state.currentAudio.src;
+        if (oldSrc && oldSrc.startsWith('blob:')) URL.revokeObjectURL(oldSrc);
+        state.currentAudio.pause();
+        state.currentAudio.remove();
+        state.currentAudio = null;
+    }
 
     // Show mini player
     const miniPlayer = document.getElementById('mini-player');
     miniPlayer.classList.remove('hidden');
-
-    // Update mini player
-    document.getElementById('mini-player-track').textContent = name || query;
-    document.getElementById('mini-player-artist').textContent = artists || '';
+    document.getElementById('mini-player-track').textContent = title;
+    document.getElementById('mini-player-artist').textContent = artist;
     document.getElementById('mini-player-progress-fill').style.width = '0%';
-
-    const miniCover = document.getElementById('mini-player-cover-img');
-    if (cover) { miniCover.src = cover; miniCover.style.display = ''; }
-    else { miniCover.style.display = 'none'; }
+    document.getElementById('mini-player-cover-img').style.display = 'none';
 
     // Update fullscreen
-    document.getElementById('np-track-name').textContent = name || query;
-    document.getElementById('np-artist-name').textContent = artists || '';
+    document.getElementById('np-track-name').textContent = title;
+    document.getElementById('np-artist-name').textContent = artist;
     document.getElementById('np-progress-fill').style.width = '0%';
     document.getElementById('np-time-current').textContent = '0:00';
     document.getElementById('np-time-total').textContent = '...';
+    document.getElementById('np-cover').style.display = 'none';
+    document.getElementById('np-cover-placeholder').style.display = 'flex';
 
-    const npCover = document.getElementById('np-cover');
-    const npPlaceholder = document.getElementById('np-cover-placeholder');
-    if (cover) { npCover.src = cover; npCover.style.display = ''; npPlaceholder.style.display = 'none'; }
-    else { npCover.style.display = 'none'; npPlaceholder.style.display = 'flex'; }
-
-    // Loading state
     const playBtns = [document.getElementById('ctrl-play'), document.getElementById('ctrl-play-lg')];
-    playBtns.forEach(b => { if (b) b.innerHTML = '<div class="spinner" style="width:18px;height:18px;border-width:2px;margin:0"></div>'; });
-
-    const audio = new Audio(`/stream/audio?q=${encodeURIComponent(query)}`);
+    
+    // Fetch file as blob for inline playback
+    let audioSrc;
+    try {
+        const fileRes = await fetch(`/files/download/${encodeURIComponent(filename)}`);
+        if (fileRes.ok) {
+            const blob = await fileRes.blob();
+            audioSrc = URL.createObjectURL(blob);
+        }
+    } catch (_) { /* fall through */ }
+    
+    if (!audioSrc) {
+        showToast('Failed to load file for playback', 'error');
+        return;
+    }
+    const audio = new Audio(audioSrc);
     state.currentAudio = audio;
-    state.playerTrack = { name, artists, cover, query };
+    state.playerTrack = { name: title, artists: artist, cover: null, query: displayName };
 
     audio.addEventListener('loadedmetadata', () => {
         const dur = formatTime(audio.duration || 0);
@@ -903,20 +612,19 @@ async function streamTrack(query, name, artists, cover) {
         document.getElementById('mini-player-progress-fill').style.width = '0%';
         document.getElementById('np-progress-fill').style.width = '0%';
         document.getElementById('np-time-current').textContent = '0:00';
+        if (audio.src && audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src);
     });
     audio.addEventListener('error', () => {
-        showToast('Failed to stream track', 'error');
-        devLog('Stream error', { query });
+        showToast('Failed to play file', 'error');
         playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="6,3 20,12 6,21" fill="currentColor"/></svg>'; });
     });
 
     try {
         await audio.play();
-        showToast(`Now playing: ${name || query}`, 'info');
+        showToast(`Now playing: ${title}`, 'info');
     } catch (e) {
         showToast('Tap play to start', 'info');
         playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="6,3 20,12 6,21" fill="currentColor"/></svg>'; });
-        devLog('Autoplay blocked', { error: e.message });
     }
 }
 
@@ -943,7 +651,6 @@ function renderSearchResults(data, query) {
                 <div class="card-subtitle">${escapeHtml(t.artists)}</div>
                 <div class="card-meta">${escapeHtml(t.album)} &middot; ${formatDuration(t.duration_ms)}</div>
                 <div class="card-actions-row">
-                    <button class="card-stream" title="Stream"><svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
                     <button class="card-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
                 </div>
             </div>`;
@@ -1009,7 +716,7 @@ async function triggerDownload() {
             const previewRes = await fetch('/download/playlist-preview', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, quality: state.defaultQuality, downloader: state.defaultDownloader }),
+                body: JSON.stringify({ url, quality: 'HIGH', downloader: state.defaultDownloader }),
             });
             if (!previewRes.ok) {
                 const err = await previewRes.json().catch(() => ({ detail: 'Failed to load playlist' }));
@@ -1030,7 +737,7 @@ async function triggerDownload() {
             const batchRes = await fetch('/download/playlist-batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, quality: state.defaultQuality, downloader: state.defaultDownloader }),
+                body: JSON.stringify({ url, quality: 'HIGH', downloader: state.defaultDownloader }),
             });
             if (!batchRes.ok) {
                 hideDownloadOverlay();
@@ -1161,7 +868,7 @@ async function startDownloadWithProgress(url, source, cardEl, extraFields = {}) 
         const res = await fetch('/download/task', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, quality: state.defaultQuality, downloader: state.defaultDownloader, ...extraFields }),
+            body: JSON.stringify({ url, quality: 'HIGH', downloader: state.defaultDownloader, ...extraFields }),
         });
         if (!res.ok) {
             const err = await res.json().catch(() => ({ detail: 'Failed to start download' }));
@@ -1440,6 +1147,10 @@ async function _finishBatchPlaylist(batchKey) {
 }
 
 // ===== Playlists =====
+function setupPlaylists() {
+    document.getElementById('btn-new-playlist').addEventListener('click', createNewPlaylist);
+}
+
 function createNewPlaylist() {
     const name = prompt('Playlist name:');
     if (!name || !name.trim()) return;
@@ -1514,26 +1225,52 @@ function openPlaylistView(playlist) {
         });
     }
     document.getElementById('btn-detail-download').onclick = () => downloadPlaylistZip(playlist);
+    document.getElementById('btn-detail-download').style.display = '';
     document.getElementById('btn-detail-add-playlist').style.display = 'none';
     document.getElementById('btn-detail-open-spotify').style.display = 'none';
-    document.getElementById('detail-modal').style.display = 'flex';
+    document.getElementById('detail-modal').classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
 }
 async function downloadPlaylistZip(playlist) {
     if (playlist.tracks.length === 0) { showToast('Playlist is empty', 'error'); return; }
     const localFiles = state.downloadedFiles;
-    if (localFiles.length === 0) { showToast('No downloaded files yet', 'error'); return; }
     const matchedFiles = [], unmatchedTracks = [];
+    
+    // Smart matching: check filename, displayName, and partial word overlap
     for (const track of playlist.tracks) {
         let found = false;
-        const trackWords = track.name.toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+        const trackWords = (track.name || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+        const artistWords = (track.artists || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
         for (const lf of localFiles) {
             const sfName = (lf.displayName || lf.filename || '').toLowerCase();
-            if (trackWords.length > 0 && trackWords.every(w => sfName.includes(w))) { matchedFiles.push(lf.filename); found = true; break; }
+            // Match by track name words AND artist words
+            const nameMatch = trackWords.length > 0 && trackWords.every(w => sfName.includes(w));
+            const artistMatch = artistWords.length > 0 && artistWords.some(w => sfName.includes(w));
+            if (nameMatch || artistMatch) { matchedFiles.push(lf.filename); found = true; break; }
         }
         if (!found) unmatchedTracks.push(track);
     }
-    if (matchedFiles.length === 0) { showToast('No matching files found', 'error'); return; }
-    if (unmatchedTracks.length > 0) showToast(`Zipping ${matchedFiles.length} tracks (${unmatchedTracks.length} not yet downloaded)`, 'info');
+    
+    if (matchedFiles.length === 0) {
+        // Offer to download the tracks first — but since downloads are async,
+        // explain that the user needs to come back after downloads finish.
+        const undownloadedUrls = unmatchedTracks.map(t => t.url).filter(Boolean);
+        if (undownloadedUrls.length > 0) {
+            const count = Math.min(undownloadedUrls.length, 10);
+            const confirmed = confirm(`No downloaded files match this playlist. Download ${count} tracks now?\n\n(Downloads run in the background — come back to the Downloads tab to check progress, then click Download ZIP again.)`);
+            if (confirmed) {
+                closeDetailView();
+                const toDownload = undownloadedUrls.slice(0, 10);
+                showToast(`Queued ${toDownload.length} tracks for download`, 'info');
+                // Fire all downloads immediately — backend semaphore limits concurrency
+                toDownload.forEach(url => startDownloadWithProgress(url, 'tab'));
+            }
+        } else {
+            showToast('No matching files found and no Spotify URLs to download', 'error');
+        }
+        return;
+    }
+    if (unmatchedTracks.length > 0) showToast(`Zipping ${matchedFiles.length} tracks (${unmatchedTracks.length} not found locally)`, 'info');
     try {
         const res = await fetch('/playlists/download-zip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filenames: matchedFiles }) });
         if (res.ok) { const blob = await res.blob(); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${playlist.name.replace(/[^a-zA-Z0-9]/g, '_')}.zip`; a.click(); showToast('ZIP download started!', 'success'); }

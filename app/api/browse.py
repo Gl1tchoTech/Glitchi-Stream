@@ -15,6 +15,96 @@ from app.services.spotify_search_service import (
 router = APIRouter(prefix="/browse", tags=["Browse"])
 
 
+def _flatten_browse_items(items, kind):
+    """Flatten raw search results into simple dicts for the browse/all endpoint."""
+    if not items:
+        return []
+    result = []
+    for item in items:
+        if kind == 'playlist':
+            result.append({
+                "id": item.get("id", ""),
+                "name": item.get("name", ""),
+                "image_url": item.get("image_url", ""),
+                "owner": item.get("owner", ""),
+                "url": item.get("url", ""),
+                "tracks_count": item.get("tracks_count", 0),
+                "type": "playlist",
+            })
+        elif kind == 'album':
+            result.append({
+                "id": item.get("id", ""),
+                "name": item.get("name", ""),
+                "artists": item.get("artists", ""),
+                "image_url": item.get("image_url", ""),
+                "url": item.get("url", ""),
+                "type": "album",
+            })
+        elif kind == 'track':
+            result.append({
+                "id": item.get("id", ""),
+                "name": item.get("name", ""),
+                "artists": item.get("artists", ""),
+                "album_image_url": item.get("album_image_url", ""),
+                "url": item.get("url", ""),
+                "album": item.get("album", ""),
+                "duration_ms": item.get("duration_ms", 0),
+                "type": "track",
+            })
+    return result
+
+
+def _fetch_trending():
+    """Helper for browse/all to fetch trending tracks."""
+    return search_spotify(q="top hits", search_type="track", limit=12, market="US")
+
+
+@router.get("/all")
+async def browse_all():
+    """Return all browse data in a single response — categories + featured + new releases + trending.
+    
+    Used by the frontend to preload the entire Browse page instantly on load,
+    instead of making 4+ sequential API calls.
+    """
+    import asyncio
+    
+    # Fetch all sections in parallel
+    async def _safe_fetch(fn, *args, **kwargs):
+        try:
+            result = await asyncio.to_thread(fn, *args, **kwargs)
+            return result
+        except Exception:
+            return None
+    
+    featured_raw, new_releases_raw, trending_raw = await asyncio.gather(
+        _safe_fetch(get_featured_playlists, 12),
+        _safe_fetch(get_new_releases, 12),
+        _safe_fetch(_fetch_trending),
+    )
+    
+    featured_items = []
+    if featured_raw:
+        playlists = featured_raw.get("playlists", {}).get("items", []) if isinstance(featured_raw, dict) else []
+        featured_items = _flatten_browse_items(playlists, 'playlist')
+    
+    new_release_items = []
+    if new_releases_raw:
+        albums = new_releases_raw.get("albums", {}).get("items", []) if isinstance(new_releases_raw, dict) else []
+        new_release_items = _flatten_browse_items(albums, 'album')
+    
+    trending_items = []
+    if trending_raw:
+        tracks = trending_raw.get("tracks", {}).get("items", []) if isinstance(trending_raw, dict) else []
+        trending_items = _flatten_browse_items(tracks, 'track')
+    
+    return {
+        "categories": BROWSE_CATEGORIES,
+        "featured": featured_items[:12],
+        "newReleases": new_release_items[:12],
+        "trending": trending_items[:12],
+    }
+
+
 @router.get("/categories")
 async def categories():
     """Return all available browse categories (genres, moods, scenes)."""
