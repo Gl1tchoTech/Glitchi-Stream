@@ -14,7 +14,8 @@ def test_download_invalid_url():
         "/download/",
         json={"url": "https://google.com"},
     )
-    assert response.status_code == 422
+    # HttpUrl accepts google.com; the route then rejects it as non-Spotify
+    assert response.status_code == 400
 
 
 def test_download_valid_spotify_url():

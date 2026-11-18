@@ -35,6 +35,12 @@ async def root():
     return FileResponse("static/index.html")
 
 
+@app.get("/p/{playlist_id}")
+async def playlist_deep_link(playlist_id: str):
+    """Deep link to a playlist download page — the SPA reads the id from the URL."""
+    return FileResponse("static/index.html")
+
+
 @app.get("/favicon.ico")
 async def favicon():
     """Return a minimal SVG favicon to prevent 404s."""

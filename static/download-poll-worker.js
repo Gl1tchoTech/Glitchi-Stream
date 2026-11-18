@@ -1,61 +1,82 @@
-// ===== Download Progress Polling Worker =====
-// Runs in a separate thread — not throttled when the browser tab is hidden.
-// Polls /download/progress/{taskId} every 1s and posts results to main thread.
+// ===== Download progress polling worker =====
+// Runs off the main thread so progress keeps flowing while the page is busy,
+// and so the UI can refresh instantly when the tab becomes visible again.
+// All download work happens on the server — this only mirrors progress.
 
-const POLL_INTERVAL_MS = 1000;
-const _activeTasks = {}; // { taskId: intervalId }
+const TASK_INTERVAL_MS = 1000;
+const JOB_INTERVAL_MS = 1500;
 
-// Notify main thread if the worker crashes so it can recover.
+const _tasks = {}; // taskId -> intervalId
+const _jobs = {};  // jobId  -> intervalId
+
 self.onerror = function (e) {
-    self.postMessage({ taskId: null, status: 'error', error: `Worker crash: ${e.message || e}` });
+    self.postMessage({ type: 'error', error: `Worker crash: ${(e && e.message) || e}` });
 };
 
 self.onmessage = function (e) {
-    const { action, taskId, taskIds } = e.data;
+    const { action, taskId, jobId } = e.data || {};
 
-    if (action === 'start') {
-        // Start polling one or more task IDs
-        const ids = taskIds || (taskId ? [taskId] : []);
-        for (const id of ids) {
-            if (_activeTasks[id]) clearInterval(_activeTasks[id]);
-            _activeTasks[id] = setInterval(() => _poll(id), POLL_INTERVAL_MS);
-            _poll(id); // immediate first poll
-        }
-    } else if (action === 'stop') {
-        // Stop polling specific task(s) or all
-        const ids = taskIds || (taskId ? [taskId] : Object.keys(_activeTasks));
-        for (const id of ids) {
-            if (_activeTasks[id]) {
-                clearInterval(_activeTasks[id]);
-                delete _activeTasks[id];
-            }
-        }
+    if (action === 'start' && taskId) {
+        if (_tasks[taskId]) clearInterval(_tasks[taskId]);
+        _tasks[taskId] = setInterval(() => _pollTask(taskId), TASK_INTERVAL_MS);
+        _pollTask(taskId);
+    } else if (action === 'stop' && taskId) {
+        _stopTask(taskId);
+    } else if (action === 'startJob' && jobId) {
+        if (_jobs[jobId]) clearInterval(_jobs[jobId]);
+        _jobs[jobId] = setInterval(() => _pollJob(jobId), JOB_INTERVAL_MS);
+        _pollJob(jobId);
+    } else if (action === 'stopJob' && jobId) {
+        _stopJob(jobId);
+    } else if (action === 'pollNow') {
+        Object.keys(_tasks).forEach(_pollTask);
+        Object.keys(_jobs).forEach(_pollJob);
+    } else if (action === 'stopAll') {
+        Object.keys(_tasks).forEach(_stopTask);
+        Object.keys(_jobs).forEach(_stopJob);
     }
 };
 
-async function _poll(taskId) {
+async function _pollTask(taskId) {
     try {
-        const res = await fetch(`/download/progress/${taskId}`);
+        const res = await fetch(`/download/progress/${taskId}`, { cache: 'no-store' });
         if (!res.ok) {
-            // Stop polling if the endpoint is gone (404) or server error
-            if (res.status === 404) _autoStop(taskId);
+            if (res.status === 404) _stopTask(taskId);
             return;
         }
         const task = await res.json();
-        self.postMessage({ taskId, ...task });
-
-        // Auto-stop when terminal state reached
-        if (task.status === 'complete' || task.status === 'failed') {
-            _autoStop(taskId);
-        }
-    } catch (_err) {
-        // Network hiccup — keep polling
+        self.postMessage({ task_id: taskId, ...task });
+        if (task.status === 'complete' || task.status === 'failed') _stopTask(taskId);
+    } catch (_) {
+        // Offline or server restart — keep the interval, it will retry.
     }
 }
 
-function _autoStop(taskId) {
-    if (_activeTasks[taskId]) {
-        clearInterval(_activeTasks[taskId]);
-        delete _activeTasks[taskId];
+async function _pollJob(jobId) {
+    try {
+        const res = await fetch(`/playlists/jobs/${jobId}`, { cache: 'no-store' });
+        if (!res.ok) {
+            if (res.status === 404) _stopJob(jobId);
+            return;
+        }
+        const job = await res.json();
+        self.postMessage({ type: 'job', ...job });
+        if (job.status === 'complete') _stopJob(jobId);
+    } catch (_) {
+        // Keep retrying on the next tick.
+    }
+}
+
+function _stopTask(taskId) {
+    if (_tasks[taskId]) {
+        clearInterval(_tasks[taskId]);
+        delete _tasks[taskId];
+    }
+}
+
+function _stopJob(jobId) {
+    if (_jobs[jobId]) {
+        clearInterval(_jobs[jobId]);
+        delete _jobs[jobId];
     }
 }

@@ -1,27 +1,71 @@
-// ===== State =====
-const state = {
-    activeTab: 'home',
-    theme: localStorage.getItem('glitchi-theme') || 'dark',
-    searchTimeout: null,
-    defaultDownloader: localStorage.getItem('glitchi-downloader') || 'ytdlp',
-    playlists: JSON.parse(localStorage.getItem('glitchi-playlists') || '[]'),
-    downloadedFiles: JSON.parse(localStorage.getItem('glitchi-downloaded-files') || '[]'),
-    listeningHistory: JSON.parse(localStorage.getItem('glitchi-listening-history') || '{"streams":[],"downloads":[],"genreClicks":[],"searches":[]}'),
-    detailItem: null,
-    currentAudio: null,
-    playerTrack: null,
-    librarySegment: 'files',     // 'files' | 'playlists'
-    nowPlayingOpen: false,
-    _downloadStartTime: null,       // for ETA calculation
-    _downloadTotalTracks: 0,       // for playlist batch progress
-    _downloadCompletedTracks: 0,   // for playlist batch progress
-    _pollWorker: null,             // Web Worker for background-safe polling
+/* ============================================================================
+   Glitchi-Stream — frontend
+   Vanilla JS, no build step. Sections:
+     1. helpers / state        6. library & playlists
+     2. boot & navigation      7. player
+     3. changelog              8. downloads (single + playlist jobs)
+     4. search                 9. keep-alive & polling
+     5. detail view           10. utilities
+   ========================================================================== */
+
+'use strict';
+
+/* ── 1. helpers / state ─────────────────────────────────────────────────── */
+
+const LS = {
+    theme: 'glitchi-theme',
+    downloader: 'glitchi-downloader',
+    playlists: 'glitchi-playlists',
+    files: 'glitchi-downloaded-files',
+    history: 'glitchi-listening-history',
+    activeDownload: 'glitchi-active-download',
+    job: 'glitchi-active-job',
+    seenVersion: 'glitchi-seen-version',
 };
 
-// ===== Logger (dev mode) =====
-function devLog(msg, data) { /* no-op: dev options removed */ }
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
-// ===== Device Detection =====
+function readJSON(key, fallback) {
+    try {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw) : fallback;
+    } catch (_) {
+        return fallback;
+    }
+}
+function writeJSON(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (_) { /* private mode */ }
+}
+
+const state = {
+    activeTab: 'home',
+    theme: localStorage.getItem(LS.theme) || 'dark',
+    defaultDownloader: localStorage.getItem(LS.downloader) || 'ytdlp',
+    playlists: readJSON(LS.playlists, []),
+    files: readJSON(LS.files, []),
+    history: readJSON(LS.history, { streams: [], downloads: [], searches: [] }),
+    detailItem: null,
+    audio: null,
+    playerTrack: null,
+    librarySegment: 'files',
+    playlist: null,          // { kind, name, cover, tracks: [] }
+    playlistKey: null,       // Spotify id used for the /p/<id> deep link
+    selected: new Set(),     // indexes into state.playlist.tracks
+    job: null,               // { id, name, total, startedAt, status, autoZip }
+    jobSnapshot: null,
+    devNotes: null,
+    filter: 'all',
+    searchCache: {},
+    pollContexts: {},        // taskId -> { btn, rowEl }
+    worker: null,
+    wakeLock: null,
+};
+
+const PROGRESS_PCT = { pending: 5, downloading: 35, processing: 80, complete: 100, failed: 100 };
+
+/* ── 2. boot & navigation ───────────────────────────────────────────────── */
+
 function detectDevice() {
     const ua = navigator.userAgent || '';
     const platform = navigator.platform || '';
@@ -33,1293 +77,1560 @@ function detectDevice() {
     else if (/linux/i.test(platform)) html.setAttribute('data-platform', 'linux');
     else html.setAttribute('data-platform', 'other');
 
-    const isMobile = /android|iphone|ipad|ipod|webos|blackberry|iemobile|opera mini/i.test(ua)
+    const mobile = /android|iphone|ipad|ipod|webos|blackberry|iemobile|opera mini/i.test(ua)
         || (platform === 'MacIntel' && navigator.maxTouchPoints > 1)
-        || (window.innerWidth <= 768);
-    html.setAttribute('data-mobile', isMobile ? 'true' : 'false');
+        || window.innerWidth <= 768;
+    html.setAttribute('data-mobile', mobile ? 'true' : 'false');
     html.setAttribute('data-touch', ('ontouchstart' in window || navigator.maxTouchPoints > 0) ? 'true' : 'false');
-    devLog('Device detected', { platform: html.getAttribute('data-platform'), mobile: isMobile });
-    return isMobile;
 }
 
-// ===== Init =====
 document.addEventListener('DOMContentLoaded', () => {
     detectDevice();
     applyTheme(state.theme);
-    document.getElementById('settings-theme').value = state.theme;
-    document.getElementById('settings-downloader').value = state.defaultDownloader;
+    buildThemeOptions();
     setupNavigation();
     setupSearch();
     setupLibrary();
     setupFiles();
     setupDownload();
-    setupThemeSwitcher();
-    setupFilterChips();
-    setupFileCardDelegation();
-    setupResultCardDelegation();
     setupModals();
     setupSettings();
     setupPlaylists();
-    setupNowPlaying();
-    fetchAvailableDownloaders();
-    loadHomePage();  // fetch dev-notes.json and render home tab
-    openTab(state.activeTab);
-    loadFiles();
+    setupPlayer();
+    startPollWorker();
+
+    $('#settings-downloader').value = state.defaultDownloader;
+    $('#settings-theme').value = state.theme;
+
+    const initialPlaylistId = currentPlaylistIdFromUrl();
+    state.playlistKey = initialPlaylistId;
+    openTab(initialPlaylistId ? 'download' : state.activeTab);
     renderPlaylists();
-    // Create background polling worker (not throttled when tab is hidden)
-    state._pollWorker = new Worker('/static/download-poll-worker.js');
-    state._pollWorker.onmessage = _handleWorkerMessage;
-    resumeActiveDownloads();
+    loadFiles();
+    fetchDownloaders();
+    loadHome();
+    if (initialPlaylistId) restorePlaylistPage(initialPlaylistId);
+    else resumeJob();
+    resumeSingleDownload();
+
+    window.addEventListener('resize', detectDevice);
+    window.addEventListener('online', () => showToast('Back online', 'info'));
+    window.addEventListener('popstate', () => {
+        const id = currentPlaylistIdFromUrl();
+        if (!id) return;
+        state.playlistKey = id;
+        openTab('download');
+        restorePlaylistPage(id);
+    });
 });
 
-// ===== Theme =====
-function applyTheme(name) {
-    document.documentElement.setAttribute('data-theme', name);
-    state.theme = name;
-    localStorage.setItem('glitchi-theme', name);
-    document.querySelectorAll('.theme-btn').forEach(b => b.classList.toggle('active', b.dataset.theme === name));
-    const sel = document.getElementById('settings-theme');
-    if (sel) sel.value = name;
-}
-
-function setupThemeSwitcher() {
-    document.querySelectorAll('.theme-btn').forEach(btn => btn.addEventListener('click', () => applyTheme(btn.dataset.theme)));
-}
-
-// ===== Navigation (Desktop sidebar + Mobile tab bar) =====
 function setupNavigation() {
-    const allNavItems = document.querySelectorAll('.nav-item[data-tab], .mobile-tab[data-tab]');
-    allNavItems.forEach(item => item.addEventListener('click', () => openTab(item.dataset.tab)));
+    $$('.nav-item[data-tab], .mobile-tab[data-tab]').forEach((el) => {
+        el.addEventListener('click', () => openTab(el.dataset.tab));
+    });
+    $$('[data-tab-jump]').forEach((el) => {
+        el.addEventListener('click', () => openTab(el.dataset.tabJump));
+    });
 }
 
 function openTab(name) {
+    if (name !== 'download') clearPlaylistUrl();
     state.activeTab = name;
-    // Update sidebar nav
-    document.querySelectorAll('.nav-item[data-tab]').forEach(i => i.classList.toggle('active', i.dataset.tab === name));
-    // Update mobile tabs
-    document.querySelectorAll('.mobile-tab[data-tab]').forEach(i => i.classList.toggle('active', i.dataset.tab === name));
-    // Show/hide tab content
-    document.querySelectorAll('.tab-content').forEach(t => t.classList.toggle('active', t.id === `tab-${name}`));
-    if (name === 'home') loadHomePage();
-    if (name === 'search') document.getElementById('search-input')?.focus();
-    if (name === 'library') { loadFiles(); renderPlaylists(); }
+    $$('.nav-item[data-tab]').forEach((el) => el.classList.toggle('active', el.dataset.tab === name));
+    $$('.mobile-tab[data-tab]').forEach((el) => el.classList.toggle('active', el.dataset.tab === name));
+    $$('.tab-content').forEach((el) => el.classList.toggle('active', el.id === `tab-${name}`));
+    $('.main-content').scrollTop = 0;
+
+    if (name === 'search') setTimeout(() => $('#search-input')?.focus(), 60);
+    if (name === 'library') loadFiles();
+    if (name === 'home') updateHomeCounts();
 }
 
-// ===== Home Tab =====
-// Content is hardcoded in index.html — renders instantly with zero JS or API calls.
-// Edit static/index.html to update the version, changelog, or DEV notes.
-function loadHomePage() {
-    // No-op: content is static HTML
+/* Deep links: /p/<spotify-id> reopens that playlist's job after a refresh. */
+
+function currentPlaylistIdFromUrl() {
+    const match = location.pathname.match(/^\/p\/([A-Za-z0-9]+)\/?$/);
+    return match ? match[1] : null;
 }
 
-// ===== Listening History =====
-function saveListeningHistory() {
-    localStorage.setItem('glitchi-listening-history', JSON.stringify(state.listeningHistory));
+function setPlaylistUrl(playlistId) {
+    if (!playlistId) return;
+    const path = `/p/${encodeURIComponent(playlistId)}`;
+    if (location.pathname !== path) history.replaceState({ playlistId }, '', path);
 }
 
-function trackGenreClick(genreId) {
-    const h = state.listeningHistory;
-    const genreClicks = h.genreClicks || [];
-    const existing = genreClicks.find(g => g.id === genreId);
-    if (existing) {
-        existing.count = (existing.count || 1) + 1;
-        existing.lastAt = Date.now();
-    } else {
-        genreClicks.push({ id: genreId, count: 1, lastAt: Date.now() });
+function clearPlaylistUrl() {
+    if (location.pathname.startsWith('/p/')) history.replaceState({}, '', '/');
+}
+
+/* ── 3. theme + changelog ───────────────────────────────────────────────── */
+
+const THEMES = [
+    ['dark', 'Dark'], ['galactical', 'Galactical'], ['sunset', 'Sunset'], ['ocean', 'Ocean'],
+    ['forest', 'Forest'], ['neon', 'Neon'], ['monochrome', 'Monochrome'], ['candy', 'Candy'],
+    ['midnight', 'Midnight'], ['ember', 'Ember'], ['arctic', 'Arctic'], ['cyberpunk', 'Cyberpunk'],
+    ['retro', 'Retro'], ['lavender', 'Lavender'], ['moss', 'Moss'], ['crimson', 'Crimson'],
+    ['slate', 'Slate'], ['gold', 'Gold'],
+];
+
+function buildThemeOptions() {
+    const select = $('#settings-theme');
+    if (!select || select.options.length) return;
+    select.innerHTML = THEMES.map(([id, label]) => `<option value="${id}">${label}</option>`).join('');
+}
+
+function applyTheme(name) {
+    state.theme = name;
+    document.documentElement.setAttribute('data-theme', name);
+    localStorage.setItem(LS.theme, name);
+    $$('.theme-btn').forEach((btn) => btn.classList.toggle('active', btn.dataset.theme === name));
+    const select = $('#settings-theme');
+    if (select) select.value = name;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.setAttribute('content', getComputedStyle(document.documentElement).getPropertyValue('--bg-primary').trim() || '#0a0a0c');
+}
+
+function setupThemeSwitcher() {
+    $$('.theme-btn').forEach((btn) => btn.addEventListener('click', () => applyTheme(btn.dataset.theme)));
+}
+document.addEventListener('DOMContentLoaded', setupThemeSwitcher);
+
+async function fetchDevNotes() {
+    try {
+        const res = await fetch('/static/dev-notes.json', { cache: 'no-store' });
+        if (!res.ok) return null;
+        return await res.json();
+    } catch (_) {
+        return null;
     }
-    genreClicks.sort((a, b) => b.count - a.count);
-    if (genreClicks.length > 30) genreClicks.length = 30;
-    h.genreClicks = genreClicks;
-    saveListeningHistory();
 }
 
-function trackSearch(query) {
-    const h = state.listeningHistory;
-    const searches = h.searches || [];
-    searches.unshift({ query, at: Date.now() });
-    if (searches.length > 50) searches.length = 50;
-    h.searches = searches;
-    saveListeningHistory();
+async function loadHome() {
+    const notes = state.devNotes || await fetchDevNotes();
+    if (notes) {
+        state.devNotes = notes;
+        $('#home-version').textContent = notes.version ? `v${notes.version.replace(/^v/, '')}` : '';
+        $('#home-date').textContent = notes.releaseDate || '';
+        const latest = (notes.changelog || []).slice(0, 3);
+        $('#home-changelog-list').innerHTML = latest.map((item) => `<li>${escapeHtml(item)}</li>`).join('');
+    }
+    updateHomeCounts();
+    maybeShowChangelog();
 }
 
-function trackStream(artist, title) {
-    const h = state.listeningHistory;
-    const streams = h.streams || [];
-    streams.unshift({ artist, title, at: Date.now() });
-    if (streams.length > 50) streams.length = 50;
-    h.streams = streams;
-    saveListeningHistory();
+function updateHomeCounts() {
+    const fileEl = $('#home-file-count');
+    const plEl = $('#home-playlist-count');
+    if (fileEl) fileEl.textContent = String(state.files.length);
+    if (plEl) plEl.textContent = String(state.playlists.length);
 }
 
-function trackDownload(artist, title) {
-    const h = state.listeningHistory;
-    const downloads = h.downloads || [];
-    downloads.unshift({ artist, title, at: Date.now() });
-    if (downloads.length > 50) downloads.length = 50;
-    h.downloads = downloads;
-    saveListeningHistory();
+async function maybeShowChangelog() {
+    const notes = state.devNotes || await fetchDevNotes();
+    if (!notes) return;
+    state.devNotes = notes;
+    let seen = null;
+    try { seen = localStorage.getItem(LS.seenVersion); } catch (_) {}
+    if (seen !== String(notes.version)) openChangelog(notes);
 }
 
-// ===== Library Segment Control =====
-function setupLibrary() {
-    document.querySelectorAll('#library-segment .segment-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            state.librarySegment = btn.dataset.segment;
-            document.querySelectorAll('#library-segment .segment-btn').forEach(b => b.classList.toggle('active', b.dataset.segment === state.librarySegment));
-            document.querySelectorAll('.segment-panel').forEach(p => p.classList.toggle('active', p.id === `segment-${state.librarySegment}`));
-        });
+function openChangelog(notes) {
+    if (!notes) notes = state.devNotes;
+    if (!notes) return;
+    state.devNotes = notes;
+    $('#changelog-version').textContent = notes.version ? `v${notes.version.replace(/^v/, '')}` : 'Release notes';
+    $('#changelog-date').textContent = notes.releaseDate || '';
+    $('#changelog-title').textContent = notes.updateTitle || '';
+    $('#changelog-list').innerHTML = (notes.changelog || [])
+        .map((item) => `<li>${escapeHtml(item)}</li>`)
+        .join('');
+    $('#changelog-modal').style.display = 'flex';
+    document.body.dataset.overlay = 'open';
+}
+
+function closeChangelog() {
+    $('#changelog-modal').style.display = 'none';
+    document.body.dataset.overlay = '';
+    if (state.devNotes?.version) {
+        try { localStorage.setItem(LS.seenVersion, String(state.devNotes.version)); } catch (_) {}
+    }
+}
+
+function setupChangelog() {
+    $$('[data-changelog]').forEach((btn) => btn.addEventListener('click', () => openChangelog(state.devNotes)));
+    $('#changelog-close')?.addEventListener('click', closeChangelog);
+    $('#changelog-ok')?.addEventListener('click', closeChangelog);
+    $('#changelog-modal')?.addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) closeChangelog();
     });
 }
+document.addEventListener('DOMContentLoaded', setupChangelog);
 
-// ===== Toast =====
-function showToast(message, type = 'info') {
-    const container = document.getElementById('toast-container');
-    const toast = document.createElement('div');
-    toast.className = `toast ${type}`;
-    toast.textContent = message;
-    container.appendChild(toast);
-    setTimeout(() => {
-        toast.style.opacity = '0';
-        toast.style.transform = 'translateX(20px)';
-        toast.style.transition = 'all 250ms ease';
-        setTimeout(() => toast.remove(), 250);
-    }, 3500);
-}
-
-// ===== Filter Chips =====
-let _activeFilter = 'all';
-function setupFilterChips() {
-    document.querySelectorAll('.filter-chip').forEach(chip => {
-        chip.addEventListener('click', () => {
-            document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-            chip.classList.add('active');
-            _activeFilter = chip.dataset.filter;
-            const input = document.getElementById('search-input');
-            if (input.value.trim().length > 0) doSearch();
-        });
-    });
-}
-
-// ===== Search (with client-side cache for instant repeat searches) =====
-let _searchCache = {}; // { queryKey: { data, timestamp } }
-const SEARCH_CACHE_TTL = 60000; // 1 minute
+/* ── 4. search ──────────────────────────────────────────────────────────── */
 
 function setupSearch() {
-    const input = document.getElementById('search-input');
-    let debounceTimer;
-    input.addEventListener('input', () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(doSearch, 250); });
-    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { clearTimeout(debounceTimer); doSearch(); } });
+    const input = $('#search-input');
+    const clear = $('#search-clear');
+    let timer;
+
+    input.addEventListener('input', () => {
+        clear.classList.toggle('hidden', input.value.length === 0);
+        clearTimeout(timer);
+        timer = setTimeout(doSearch, 260);
+    });
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { clearTimeout(timer); doSearch(); }
+    });
+    clear.addEventListener('click', () => {
+        input.value = '';
+        clear.classList.add('hidden');
+        doSearch();
+        input.focus();
+    });
+
+    $$('.filter-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+            $$('.filter-chip').forEach((c) => c.classList.remove('active'));
+            chip.classList.add('active');
+            state.filter = chip.dataset.filter;
+            if ($('#search-input').value.trim()) doSearch();
+        });
+    });
+
+    $('#search-results').addEventListener('click', onResultClick);
 }
 
-function getActiveTypes() {
-    if (_activeFilter === 'all') return 'track,album,artist,playlist';
-    return _activeFilter;
-}
-
-function formatDuration(ms) {
-    if (!ms) return '';
-    const mins = Math.floor(ms / 60000);
-    const secs = Math.floor((ms % 60000) / 1000);
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+function activeTypes() {
+    return state.filter === 'all' ? 'track,album,artist,playlist' : state.filter;
 }
 
 async function doSearch() {
-    const query = document.getElementById('search-input').value.trim();
-    const resultsEl = document.getElementById('search-results');
+    const query = $('#search-input').value.trim();
+    const results = $('#search-results');
     if (!query) {
-        resultsEl.innerHTML = `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" class="empty-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><p>Search for music to get started</p></div>`;
+        results.innerHTML = emptyState('search', 'Search for music to get started');
         return;
     }
-    trackSearch(query);
-    
-    // Check cache for instant repeat searches
-    const cacheKey = `${query}|${getActiveTypes()}`;
-    const cached = _searchCache[cacheKey];
-    if (cached && (Date.now() - cached.timestamp) < SEARCH_CACHE_TTL) {
-        devLog('Search cache hit', { query });
-        renderSearchResults(cached.data, query);
+
+    const key = `${query}|${activeTypes()}`;
+    const cached = state.searchCache[key];
+    if (cached && Date.now() - cached.at < 60000) {
+        renderResults(cached.data, query);
         return;
     }
-    
-    devLog('Searching', { query });
-    resultsEl.innerHTML = '<div class="spinner"></div>';
-    const types = getActiveTypes();
-    const url = `/search/?q=${encodeURIComponent(query)}&type=${encodeURIComponent(types)}&limit=20`;
+
+    results.innerHTML = '<div class="spinner"></div>';
     try {
-        const res = await fetch(url);
-        if (!res.ok) { const err = await res.json().catch(() => ({ detail: 'Search failed' })); throw new Error(err.detail || 'Search failed'); }
+        const res = await fetch(`/search/?q=${encodeURIComponent(query)}&type=${encodeURIComponent(activeTypes())}&limit=20`);
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Search failed' }));
+            throw new Error(err.detail || 'Search failed');
+        }
         const data = await res.json();
-        // Cache the result
-        _searchCache[cacheKey] = { data, timestamp: Date.now() };
-        // Limit cache size
-        const keys = Object.keys(_searchCache);
-        if (keys.length > 50) { delete _searchCache[keys[0]]; }
-        renderSearchResults(data, query);
-    } catch (e) {
-        devLog('Search error', { error: e.message });
-        resultsEl.innerHTML = `<div class="empty-state"><p style="color:#ef4444">${escapeHtml(e.message)}</p></div>`;
+        state.searchCache[key] = { data, at: Date.now() };
+        const keys = Object.keys(state.searchCache);
+        if (keys.length > 40) delete state.searchCache[keys[0]];
+        renderResults(data, query);
+    } catch (err) {
+        results.innerHTML = `<div class="empty-state"><p class="error-text">${escapeHtml(err.message)}</p></div>`;
     }
 }
 
-// ===== Event delegation for result cards =====
-function setupResultCardDelegation() {
-    document.getElementById('search-results').addEventListener('click', (e) => {
-        const card = e.target.closest('.card, .artist-item');
-        if (!card) return;
-        if (e.target.closest('.card-dl')) {
-            const url = card.dataset.url;
-            const artist = card.dataset.artist || '';
-            const title = card.dataset.title || '';
-            if (url) {
-                card.querySelector('.card-dl').disabled = true;
-                card.querySelector('.card-dl').style.opacity = '0.4';
-                state._downloadStartTime = Date.now();
-                state._downloadTotalTracks = 1;
-                state._downloadCompletedTracks = 0;
-                showDownloadOverlay(title || 'Downloading track...', 1);
-                startDownloadWithProgress(url, 'inline', card, { artist, title });
-            }
-            return;
-        }
-        const itemType = card.dataset.type;
-        const url = card.dataset.url;
-        const id = card.dataset.id || url?.split('/').pop();
-        const name = card.dataset.title || card.querySelector('.card-title')?.textContent || '';
-        const artists = card.dataset.artist || card.querySelector('.card-subtitle')?.textContent || '';
-        const cover = card.dataset.cover || card.querySelector('.card-cover')?.src || '';
-        const releaseDate = card.dataset.release || '';
-        const duration = card.dataset.duration || '';
-        const album = card.dataset.album || '';
-        const genres = card.dataset.genres || '';
-        const tracksCount = card.dataset.tracks || '';
-        openDetailView({ type: itemType, id, name, artists, cover, url, releaseDate, duration, album, genres, tracksCount });
+function onResultClick(e) {
+    const card = e.target.closest('.card, .artist-item');
+    if (!card) return;
+
+    if (e.target.closest('.card-dl')) {
+        e.stopPropagation();
+        const btn = e.target.closest('.card-dl');
+        startSingleDownload(card.dataset.url, card.dataset.artist || '', card.dataset.title || '', { btn });
+        return;
+    }
+
+    openDetailView({
+        type: card.dataset.type,
+        id: card.dataset.id,
+        name: card.dataset.title || '',
+        artists: card.dataset.artist || '',
+        cover: card.dataset.cover || '',
+        url: card.dataset.url || '',
+        album: card.dataset.album || '',
+        duration: card.dataset.duration || '',
+        releaseDate: card.dataset.release || '',
+        genres: card.dataset.genres || '',
+        tracksCount: card.dataset.tracks || '',
     });
 }
 
-// ===== Detail View / Track Preview (Spotify-style fullscreen) =====
+function coverMarkup(url) {
+    if (!url) return '<div class="card-cover-card"><div class="card-cover-fallback"><svg viewBox="0 0 24 24" fill="none"><path d="M9 18V6l11-2v12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="17" cy="16" r="3" fill="currentColor"/></svg></div></div>';
+    return `<div class="card-cover-card">
+        <img src="${escapeHtml(url)}" class="card-cover" loading="lazy" alt="" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+        <div class="card-cover-fallback" style="display:none"><svg viewBox="0 0 24 24" fill="none"><path d="M9 18V6l11-2v12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="17" cy="16" r="3" fill="currentColor"/></svg></div>
+    </div>`;
+}
+
+function renderResults(data, query) {
+    const el = $('#search-results');
+    let html = '';
+
+    const dlBtn = `<button class="card-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0l-4-4m4 4l4-4" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 19h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></button>`;
+
+    if (data.tracks?.length) {
+        html += `<section class="result-section"><h2>Tracks<span class="count">${data.tracks.length}</span></h2><div class="results-grid">`;
+        data.tracks.forEach((t) => {
+            html += `<article class="card" data-type="track" data-id="${escapeHtml(t.id)}" data-title="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.album_image_url)}" data-url="${escapeHtml(t.url)}" data-duration="${t.duration_ms}" data-album="${escapeHtml(t.album)}">
+                ${coverMarkup(t.album_image_url)}
+                <div class="card-body">
+                    <div class="card-title">${escapeHtml(t.name)}</div>
+                    <div class="card-subtitle">${escapeHtml(t.artists)}</div>
+                    <div class="card-meta">${escapeHtml(t.album || '')}${t.duration_ms ? ` · ${formatDuration(t.duration_ms)}` : ''}</div>
+                </div>
+                <div class="card-actions">${dlBtn}</div>
+            </article>`;
+        });
+        html += '</div></section>';
+    }
+
+    if (data.albums?.length) {
+        html += `<section class="result-section"><h2>Albums<span class="count">${data.albums.length}</span></h2><div class="results-grid">`;
+        data.albums.forEach((a) => {
+            html += `<article class="card" data-type="album" data-id="${escapeHtml(a.id)}" data-title="${escapeHtml(a.name)}" data-artist="${escapeHtml(a.artists)}" data-cover="${escapeHtml(a.image_url)}" data-url="${escapeHtml(a.url)}" data-release="${escapeHtml(a.release_date)}" data-tracks="${a.total_tracks}">
+                ${coverMarkup(a.image_url)}
+                <div class="card-body">
+                    <div class="card-title">${escapeHtml(a.name)}</div>
+                    <div class="card-subtitle">${escapeHtml(a.artists)}</div>
+                    <div class="card-meta">${escapeHtml(a.release_date || 'Album')}</div>
+                </div>
+            </article>`;
+        });
+        html += '</div></section>';
+    }
+
+    if (data.artists?.length) {
+        html += `<section class="result-section"><h2>Artists<span class="count">${data.artists.length}</span></h2><div class="artist-list">`;
+        data.artists.forEach((ar) => {
+            const avatar = ar.image_url
+                ? `<img src="${escapeHtml(ar.image_url)}" class="artist-avatar" loading="lazy" alt="" onerror="this.style.display='none'">`
+                : `<div class="artist-avatar fallback"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="1.6"/><path d="M4.5 20c0-3.6 3.4-5.5 7.5-5.5s7.5 1.9 7.5 5.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div>`;
+            html += `<div class="artist-item" data-type="artist" data-id="${escapeHtml(ar.id)}" data-title="${escapeHtml(ar.name)}" data-cover="${escapeHtml(ar.image_url)}" data-url="${escapeHtml(ar.url)}" data-genres="${escapeHtml(ar.genres)}">
+                ${avatar}
+                <div class="artist-text">
+                    <div class="artist-name">${escapeHtml(ar.name)}</div>
+                    ${ar.genres ? `<div class="artist-meta">${escapeHtml(ar.genres)}</div>` : '<div class="artist-meta">Artist</div>'}
+                </div>
+                <svg class="chev" viewBox="0 0 24 24" fill="none"><path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>`;
+        });
+        html += '</div></section>';
+    }
+
+    if (data.playlists?.length) {
+        html += `<section class="result-section"><h2>Playlists<span class="count">${data.playlists.length}</span></h2><div class="results-grid">`;
+        data.playlists.forEach((p) => {
+            html += `<article class="card" data-type="playlist" data-id="${escapeHtml(p.id)}" data-title="${escapeHtml(p.name)}" data-artist="${escapeHtml(p.owner)}" data-cover="${escapeHtml(p.image_url)}" data-url="${escapeHtml(p.url)}" data-tracks="${p.tracks_count}">
+                ${coverMarkup(p.image_url)}
+                <div class="card-body">
+                    <div class="card-title">${escapeHtml(p.name)}</div>
+                    <div class="card-subtitle">${escapeHtml(p.owner || 'Playlist')}</div>
+                    <div class="card-meta">${p.tracks_count} tracks</div>
+                </div>
+            </article>`;
+        });
+        html += '</div></section>';
+    }
+
+    if (!html) html = emptyState('search', `No results for “${query}”`);
+    el.innerHTML = html;
+}
+
+/* ── 5. detail view ─────────────────────────────────────────────────────── */
+
 function openDetailView(item) {
     state.detailItem = item;
-    devLog('Opening detail view', { type: item.type, name: item.name });
-    document.getElementById('detail-download-progress').classList.add('hidden');
-    document.getElementById('detail-type').textContent = item.type?.toUpperCase() || '';
-    document.getElementById('detail-title').textContent = item.name || '';
-    document.getElementById('detail-subtitle').textContent = item.artists || '';
-    document.getElementById('detail-meta').textContent = [
+    $('#detail-download-progress').classList.add('hidden');
+    $('#detail-type').textContent = (item.type || '').toUpperCase();
+    $('#detail-title').textContent = item.name || '';
+    $('#detail-subtitle').textContent = item.artists || '';
+    $('#detail-meta').textContent = [
         item.album ? `Album: ${item.album}` : '',
         item.releaseDate ? `Released: ${item.releaseDate}` : '',
-        item.duration ? formatDuration(parseInt(item.duration)) : '',
-        item.genres ? `Genres: ${item.genres}` : '',
+        item.duration ? formatDuration(parseInt(item.duration, 10)) : '',
+        item.genres || '',
         item.tracksCount ? `${item.tracksCount} tracks` : '',
-    ].filter(Boolean).join(' · ') || '';
+    ].filter(Boolean).join(' · ');
 
-    const coverEl = document.getElementById('detail-cover');
-    if (item.cover) { coverEl.src = item.cover; coverEl.style.display = ''; }
-    else { coverEl.style.display = 'none'; }
+    const cover = $('#detail-cover');
+    if (item.cover) { cover.src = item.cover; cover.style.display = ''; }
+    else cover.style.display = 'none';
 
-    const tracksSection = document.getElementById('detail-tracks');
+    const tracksSection = $('#detail-tracks');
     if (item.type === 'artist') {
         tracksSection.style.display = 'none';
     } else {
         tracksSection.style.display = '';
         if (item.type === 'album' && item.id) fetchAlbumTracks(item.id, item.cover);
-        else document.getElementById('detail-tracks-list').innerHTML = '';
+        else $('#detail-tracks-list').innerHTML = '';
     }
 
-    const btnDownload = document.getElementById('btn-detail-download');
-    const btnAddPlaylist = document.getElementById('btn-detail-add-playlist');
-    const btnOpenSpotify = document.getElementById('btn-detail-open-spotify');
-    btnDownload.style.display = ''; btnAddPlaylist.style.display = ''; btnOpenSpotify.style.display = '';
-    if (item.type === 'playlist') { btnDownload.style.display = 'none'; }
+    const dl = $('#btn-detail-download');
+    const add = $('#btn-detail-add-playlist');
+    const open = $('#btn-detail-open-spotify');
+    dl.style.display = ''; add.style.display = ''; open.style.display = '';
+    if (item.type === 'playlist') dl.style.display = 'none';
 
-    btnDownload.onclick = () => {
-        if (item.url) downloadFromDetail(item.url, item.artists, item.name);
-        else showToast('No Spotify URL available', 'error');
+    dl.onclick = () => {
+        if (!item.url) return showToast('No Spotify URL available', 'error');
+        closeDetailView();
+        openTab('download');
+        $('#download-url').value = item.url;
+        handleImport();
     };
-    btnAddPlaylist.onclick = () => openPlaylistPicker(item);
-    btnOpenSpotify.onclick = () => { if (item.url) window.open(item.url, '_blank'); };
+    add.onclick = () => openPlaylistPicker(item);
+    open.onclick = () => { if (item.url) window.open(item.url, '_blank', 'noopener'); };
 
-    document.getElementById('detail-modal').classList.remove('hidden');
-    document.body.style.overflow = 'hidden';
-}
-
-async function fetchAlbumTracks(albumId, coverUrl) {
-    const listEl = document.getElementById('detail-tracks-list');
-    listEl.innerHTML = '<div class="spinner" style="margin:16px auto"></div>';
-    try {
-        const res = await fetch(`/playlists/album-tracks/${encodeURIComponent(albumId)}`);
-        if (!res.ok) throw new Error('Failed to fetch album tracks');
-        const data = await res.json();
-        if (data.tracks && data.tracks.length > 0) {
-            listEl.innerHTML = data.tracks.map((t, i) => {
-                const img = t.album_image_url || coverUrl;
-                return `<div class="track-row" data-url="${escapeHtml(t.url)}" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(img)}">
-                    <span class="track-num">${i + 1}</span>
-                    ${img ? `<img class="track-cover" src="${escapeHtml(img)}" onerror="this.remove()">` : ''}
-                    <div class="track-info"><div class="track-name">${escapeHtml(t.name)}</div><div class="track-artist">${escapeHtml(t.artists)}</div></div>
-                    <span class="track-duration">${formatDuration(t.duration_ms)}</span>
-                    <button class="track-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-                </div>`;
-            }).join('');
-            listEl.querySelectorAll('.track-row').forEach(row => {
-                row.addEventListener('click', (e) => {
-                    if (e.target.closest('.track-dl')) { if (row.dataset.url) downloadFromDetail(row.dataset.url, row.dataset.artist, row.dataset.name); return; }
-                    if (row.dataset.url) downloadFromDetail(row.dataset.url, row.dataset.artist, row.dataset.name);
-                });
-            });
-        } else {
-            listEl.innerHTML = '<p style="color:var(--text-tertiary);padding:16px">No tracks found</p>';
-        }
-    } catch (e) {
-        listEl.innerHTML = '<p style="color:#ef4444;padding:16px">Failed to load tracks</p>';
-        devLog('Album tracks error', { albumId, error: e.message });
-    }
-}
-
-async function downloadFromDetail(url, artist, title) {
-    devLog('Starting task-based download from detail', { url, artist, title });
-    state._downloadStartTime = Date.now();
-    state._downloadTotalTracks = 1;
-    state._downloadCompletedTracks = 0;
-    showDownloadOverlay(title || 'Downloading track...', 1);
-    startDownloadWithProgress(url, 'detail', null, { artist: artist || '', title: title || '' });
+    $('#detail-modal').classList.remove('hidden');
 }
 
 function closeDetailView() {
-    document.getElementById('detail-modal').classList.add('hidden');
-    document.body.style.overflow = '';
+    $('#detail-modal').classList.add('hidden');
 }
 
-// ===== Modals =====
-function setupModals() {
-    document.getElementById('modal-close').addEventListener('click', () => closeDetailView());
-    document.getElementById('detail-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeDetailView(); });
-    document.getElementById('btn-settings').addEventListener('click', () => {
-        document.getElementById('settings-modal').style.display = 'flex';
-        document.getElementById('settings-theme').value = state.theme;
-        document.getElementById('settings-downloader').value = state.defaultDownloader;
-        fetchAvailableDownloaders();
-    });
-    document.getElementById('settings-close').addEventListener('click', () => document.getElementById('settings-modal').style.display = 'none');
-    document.getElementById('settings-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) { e.currentTarget.style.display = 'none'; fetchAvailableDownloaders(); } });
-    document.getElementById('playlist-picker-close').addEventListener('click', () => document.getElementById('playlist-picker-modal').style.display = 'none');
-    document.getElementById('playlist-picker-modal').addEventListener('click', (e) => { if (e.target === e.currentTarget) e.currentTarget.style.display = 'none'; });
-    document.getElementById('btn-new-playlist-picker').addEventListener('click', () => {
-        document.getElementById('playlist-picker-modal').style.display = 'none';
-        createNewPlaylistWithItem(state._pendingPlaylistItem);
-    });
-}
-
-// ===== Settings =====
-function setupSettings() {
-    document.getElementById('settings-theme').addEventListener('change', (e) => applyTheme(e.target.value));
-    document.getElementById('settings-downloader').addEventListener('change', (e) => {
-        state.defaultDownloader = e.target.value;
-        localStorage.setItem('glitchi-downloader', e.target.value);
-        devLog('Downloader changed', { downloader: e.target.value });
-        showToast(`Download engine: ${e.target.value}`, 'info');
-    });
-    document.getElementById('btn-clear-storage').addEventListener('click', () => {
-        if (confirm('Clear ALL local data?')) {
-            localStorage.clear();
-            state.playlists = []; state.downloadedFiles = [];
-            showToast('All local data cleared', 'info');
-            renderPlaylists(); loadFiles();
+async function fetchAlbumTracks(albumId, coverUrl) {
+    const list = $('#detail-tracks-list');
+    list.innerHTML = '<div class="spinner"></div>';
+    try {
+        const res = await fetch(`/playlists/album-tracks/${encodeURIComponent(albumId)}`);
+        if (!res.ok) throw new Error('Failed to load album tracks');
+        const data = await res.json();
+        const tracks = data.tracks || [];
+        if (!tracks.length) {
+            list.innerHTML = '<p class="muted-text">No tracks found</p>';
+            return;
         }
+        list.innerHTML = tracks.map((t, i) => {
+            const img = t.album_image_url || coverUrl;
+            return `<div class="track-row" data-url="${escapeHtml(t.url)}" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}">
+                <span class="track-num">${i + 1}</span>
+                ${img ? `<img class="track-cover" src="${escapeHtml(img)}" alt="" loading="lazy" onerror="this.remove()">` : ''}
+                <div class="track-info"><div class="track-name">${escapeHtml(t.name)}</div><div class="track-artist">${escapeHtml(t.artists)}</div></div>
+                <span class="track-duration">${formatDuration(t.duration_ms)}</span>
+                <button class="icon-btn track-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0l-4-4m4 4l4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 19h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+            </div>`;
+        }).join('');
+
+        $$('.track-row', list).forEach((row) => {
+            row.addEventListener('click', (e) => {
+                const btn = e.target.closest('.track-dl');
+                if (btn) {
+                    e.stopPropagation();
+                    startSingleDownload(row.dataset.url, row.dataset.artist, row.dataset.name, { btn });
+                    return;
+                }
+                if (row.dataset.url) startSingleDownload(row.dataset.url, row.dataset.artist, row.dataset.name);
+            });
+        });
+    } catch (err) {
+        list.innerHTML = `<p class="error-text">${escapeHtml(err.message)}</p>`;
+    }
+}
+
+/* ── 6. library & playlists ─────────────────────────────────────────────── */
+
+function setupFiles() {
+    $('#refresh-files').addEventListener('click', () => {
+        loadFiles(true);
+        showToast('Library refreshed', 'info');
     });
-    document.getElementById('btn-export-data').addEventListener('click', () => {
-        const data = { playlists: state.playlists, downloadedFiles: state.downloadedFiles, theme: state.theme };
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'glitchi-data.json'; a.click();
-        showToast('Data exported!', 'success');
+    $('#files-list').addEventListener('click', (e) => {
+        const play = e.target.closest('.file-btn-play');
+        const dl = e.target.closest('.file-btn-download');
+        if (play) playFile(play.dataset.filename);
+        if (dl) triggerFileDownload(dl.dataset.filename);
     });
 }
 
+async function loadFiles(force) {
+    let server = null;
+    try {
+        const res = await fetch('/files/', { cache: 'no-store' });
+        if (res.ok) {
+            const data = await res.json();
+            server = data.files || [];
+        }
+    } catch (_) { /* offline: fall back to cached list */ }
 
-// ===== Files =====
-function loadFiles() { renderLocalFiles(); }
-function saveDownloadedFiles() { localStorage.setItem('glitchi-downloaded-files', JSON.stringify(state.downloadedFiles)); }
-function trackDownloadedFile(filename) {
-    const displayName = filename.split('/').pop() || filename;
-    if (!state.downloadedFiles.find(f => f.filename === filename)) {
-        state.downloadedFiles.unshift({ filename, displayName, downloadedAt: Date.now() });
-        saveDownloadedFiles();
+    if (server) {
+        const stamps = new Map(state.files.map((f) => [f.filename, f.downloadedAt]));
+        const sizes = new Map(state.files.map((f) => [f.filename, f.sizeMb]));
+        state.files = server.map((f) => ({
+            filename: f.filename,
+            displayName: f.filename.split('/').pop(),
+            sizeMb: f.size_mb,
+            downloadedAt: stamps.get(f.filename) || null,
+        }));
+        writeJSON(LS.files, state.files);
+    } else if (force) {
+        showToast('Could not reach the server', 'error');
     }
-    // Parse artist/title from filename for listening history
-    const baseName = displayName.replace(/\.[^.]+$/, '');
-    const parts = baseName.split(' - ');
-    if (parts.length >= 2) {
-        trackDownload(parts[0].trim(), parts.slice(1).join(' - ').trim());
-    }
+    renderFiles();
+    updateHomeCounts();
 }
-function renderLocalFiles() {
-    const container = document.getElementById('files-list');
-    if (state.downloadedFiles.length === 0) {
-        container.innerHTML = `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" class="empty-icon"><rect x="4" y="4" width="16" height="16" rx="2" stroke="currentColor" stroke-width="2"/><path d="M9 9h6M9 13h6M9 17h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><p>No downloaded files yet</p></div>`;
+
+function renderFiles() {
+    const box = $('#files-list');
+    const count = $('#files-count');
+    if (count) count.textContent = `${state.files.length} file${state.files.length === 1 ? '' : 's'}`;
+
+    if (!state.files.length) {
+        box.innerHTML = emptyState('files', 'No downloaded files yet. Paste a playlist link to get started.');
         return;
     }
-    container.innerHTML = state.downloadedFiles.map(f => {
-        const date = new Date(f.downloadedAt).toLocaleDateString();
-        const displayName = f.displayName || f.filename.split('/').pop() || 'download';
-        return `<div class="file-card"><div class="file-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M9 18V5l12-2v13" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="18" cy="16" r="3" fill="currentColor"/></svg></div>
-            <div class="file-details"><div class="file-name" title="${escapeHtml(f.filename)}">${escapeHtml(displayName)}</div><div class="file-size">Downloaded ${date}</div></div>
+
+    box.innerHTML = state.files.map((f) => {
+        const name = f.displayName || f.filename.split('/').pop();
+        const meta = [
+            f.sizeMb ? `${Number(f.sizeMb).toFixed(1)} MB` : '',
+            f.downloadedAt ? new Date(f.downloadedAt).toLocaleDateString() : '',
+        ].filter(Boolean).join(' · ');
+        return `<div class="file-card">
+            <div class="file-icon">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M9 18V6l11-2v12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" fill="currentColor"/><circle cx="17" cy="16" r="3" fill="currentColor"/></svg>
+            </div>
+            <div class="file-details">
+                <div class="file-name" title="${escapeHtml(f.filename)}">${escapeHtml(name)}</div>
+                <div class="file-size">${escapeHtml(meta || 'Ready')}</div>
+            </div>
             <div class="file-actions">
-                <button class="file-btn file-btn-play" data-filename="${escapeHtml(f.filename)}" title="Play"><svg viewBox="0 0 24 24" fill="none"><polygon points="5,3 19,12 5,21" fill="currentColor"/></svg></button>
-                <button class="file-btn file-btn-download" data-filename="${escapeHtml(f.filename)}" title="Download"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-            </div></div>`;
+                <button class="icon-btn file-btn-play" data-filename="${escapeHtml(f.filename)}" title="Play">
+                    <svg viewBox="0 0 24 24" fill="none"><polygon points="7,4 20,12 7,20" fill="currentColor"/></svg>
+                </button>
+                <button class="icon-btn file-btn-download" data-filename="${escapeHtml(f.filename)}" title="Save to device">
+                    <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0l-4-4m4 4l4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 19h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                </button>
+            </div>
+        </div>`;
     }).join('');
 }
-function setupFiles() {
-    document.getElementById('refresh-files').addEventListener('click', loadFiles);
-    document.getElementById('clear-files').addEventListener('click', () => {
-        if (confirm('Clear downloaded files list from local storage?')) { state.downloadedFiles = []; saveDownloadedFiles(); renderLocalFiles(); showToast('Files list cleared', 'info'); }
-    });
-}
-function setupFileCardDelegation() {
-    document.getElementById('files-list').addEventListener('click', (e) => {
-        const playBtn = e.target.closest('.file-btn-play');
-        const downloadBtn = e.target.closest('.file-btn-download');
-        if (playBtn) playFile(playBtn.dataset.filename);
-        if (downloadBtn) downloadFile(downloadBtn.dataset.filename);
-    });
-}
-function downloadFile(filename) {
-    window.open(`/files/download/${encodeURIComponent(filename)}`, '_blank');
-    showToast('Download started', 'success');
+
+function trackDownloadedFile(filename) {
+    if (!filename) return;
+    const displayName = filename.split('/').pop();
+    if (!state.files.find((f) => f.filename === filename)) {
+        state.files.unshift({ filename, displayName, downloadedAt: Date.now() });
+        writeJSON(LS.files, state.files);
+    }
+    const base = displayName.replace(/\.[^.]+$/, '');
+    const parts = base.split(' - ');
+    if (parts.length >= 2) trackHistory('downloads', parts[0].trim(), parts.slice(1).join(' - ').trim());
 }
 
-// ===== Now Playing (Mini bar + Fullscreen sheet) =====
-function setupNowPlaying() {
-    // Tap mini player → open fullscreen
-    document.getElementById('mini-player-tap').addEventListener('click', () => openNowPlaying());
-    // Close fullscreen
-    document.getElementById('np-close').addEventListener('click', () => closeNowPlaying());
-    document.getElementById('now-playing-overlay').addEventListener('click', (e) => {
+function setupLibrary() {
+    $$('#library-segment .segment-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            state.librarySegment = btn.dataset.segment;
+            $$('#library-segment .segment-btn').forEach((b) => b.classList.toggle('active', b.dataset.segment === state.librarySegment));
+            $$('.segment-panel').forEach((p) => p.classList.toggle('active', p.id === `segment-${state.librarySegment}`));
+        });
+    });
+}
+
+function setupPlaylists() {
+    $('#btn-new-playlist').addEventListener('click', () => {
+        const name = prompt('Playlist name:');
+        if (!name || !name.trim()) return;
+        state.playlists.unshift({ id: Date.now().toString(), name: name.trim(), tracks: [], createdAt: Date.now() });
+        savePlaylists();
+        renderPlaylists();
+        showToast(`Playlist “${name.trim()}” created`, 'success');
+    });
+    $('#playlists-list').addEventListener('click', (e) => {
+        const card = e.target.closest('.playlist-card');
+        if (!card) return;
+        const playlist = state.playlists.find((p) => p.id === card.dataset.playlistId);
+        if (!playlist) return;
+        const action = e.target.closest('[data-action]')?.dataset.action;
+        if (action === 'zip') { e.stopPropagation(); downloadPlaylistZip(playlist); return; }
+        if (action === 'delete') {
+            e.stopPropagation();
+            if (!confirm(`Delete playlist “${playlist.name}”?`)) return;
+            state.playlists = state.playlists.filter((p) => p.id !== playlist.id);
+            savePlaylists(); renderPlaylists(); updateHomeCounts();
+            showToast('Playlist deleted', 'info');
+            return;
+        }
+        openLocalPlaylist(playlist);
+    });
+}
+
+function savePlaylists() { writeJSON(LS.playlists, state.playlists); }
+
+function renderPlaylists() {
+    const box = $('#playlists-list');
+    updateHomeCounts();
+    if (!state.playlists.length) {
+        box.innerHTML = emptyState('playlist', 'No playlists yet. Create one to get started.');
+        return;
+    }
+    box.innerHTML = state.playlists.map((p) => `<div class="playlist-card" data-playlist-id="${p.id}">
+        <div class="playlist-card-text">
+            <div class="playlist-card-name">${escapeHtml(p.name)}</div>
+            <div class="playlist-card-count">${p.tracks.length} track${p.tracks.length === 1 ? '' : 's'}</div>
+        </div>
+        <div class="playlist-card-actions">
+            <button class="icon-btn" data-action="zip" title="Download ZIP">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M4 6a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2H6a2 2 0 01-2-2z" stroke="currentColor" stroke-width="1.6"/><path d="M12 4v6m0 0l-2-2m2 2l2-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+            <button class="icon-btn danger" data-action="delete" title="Delete">
+                <svg viewBox="0 0 24 24" fill="none"><path d="M6 7h12M9 7V5h6v2M8 7l1 13h6l1-13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+        </div>
+    </div>`).join('');
+}
+
+function openLocalPlaylist(playlist) {
+    $('#detail-type').textContent = 'PLAYLIST';
+    $('#detail-title').textContent = playlist.name;
+    $('#detail-subtitle').textContent = `${playlist.tracks.length} tracks`;
+    $('#detail-meta').textContent = playlist.createdAt ? `Created ${new Date(playlist.createdAt).toLocaleDateString()}` : '';
+    $('#detail-cover').style.display = 'none';
+    $('#detail-tracks').style.display = '';
+
+    const list = $('#detail-tracks-list');
+    if (!playlist.tracks.length) {
+        list.innerHTML = '<p class="muted-text">No tracks in this playlist</p>';
+    } else {
+        list.innerHTML = playlist.tracks.map((t, i) => `<div class="track-row" data-index="${i}">
+            <span class="track-num">${i + 1}</span>
+            ${t.cover ? `<img class="track-cover" src="${escapeHtml(t.cover)}" alt="" onerror="this.remove()">` : ''}
+            <div class="track-info"><div class="track-name">${escapeHtml(t.name)}</div><div class="track-artist">${escapeHtml(t.artists)}</div></div>
+            <button class="icon-btn track-remove" title="Remove"><svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+        </div>`).join('');
+
+        $$('.track-remove', list).forEach((btn) => btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            playlist.tracks.splice(Number(btn.closest('.track-row').dataset.index), 1);
+            savePlaylists(); openLocalPlaylist(playlist); renderPlaylists();
+        }));
+    }
+
+    const dl = $('#btn-detail-download');
+    dl.style.display = '';
+    dl.onclick = () => downloadPlaylistZip(playlist);
+    $('#btn-detail-add-playlist').style.display = 'none';
+    $('#btn-detail-open-spotify').style.display = 'none';
+    $('#detail-modal').classList.remove('hidden');
+}
+
+async function downloadPlaylistZip(playlist) {
+    if (!playlist.tracks.length) return showToast('Playlist is empty', 'error');
+
+    const matched = [];
+    for (const track of playlist.tracks) {
+        const words = `${track.name || ''} ${track.artists || ''}`.toLowerCase().replace(/[^a-z0-9 ]/g, ' ').split(/\s+/).filter((w) => w.length > 1);
+        const hit = state.files.find((f) => {
+            const name = (f.displayName || f.filename).toLowerCase();
+            return words.length > 0 && words.every((w) => name.includes(w));
+        });
+        if (hit) matched.push(hit.filename);
+    }
+
+    if (!matched.length) return showToast('None of these tracks are downloaded yet', 'error');
+
+    try {
+        const res = await fetch('/playlists/download-zip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames: matched }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'ZIP creation failed' }));
+            throw new Error(err.detail || 'ZIP creation failed');
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${playlist.name.replace(/[^a-z0-9]+/gi, '_') || 'playlist'}.zip`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+        showToast(`ZIP ready — ${matched.length} tracks`, 'success');
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+/* ── 7. player ──────────────────────────────────────────────────────────── */
+
+function setupPlayer() {
+    $('#mini-player-tap').addEventListener('click', (e) => {
+        if (e.target.closest('#ctrl-play')) return;
+        openNowPlaying();
+    });
+    $('#np-close').addEventListener('click', closeNowPlaying);
+    $('#now-playing-overlay').addEventListener('click', (e) => {
         if (e.target === e.currentTarget) closeNowPlaying();
     });
-    // Play/Pause (both mini and fullscreen)
-    document.getElementById('ctrl-play').addEventListener('click', togglePlay);
-    document.getElementById('ctrl-play-lg').addEventListener('click', togglePlay);
-    // Progress bar seek (fullscreen)
-    document.getElementById('np-progress-track').addEventListener('click', (e) => {
-        if (!state.currentAudio || !state.currentAudio.duration) return;
-        const rect = e.currentTarget.getBoundingClientRect();
-        const pct = (e.clientX - rect.left) / rect.width;
-        state.currentAudio.currentTime = pct * state.currentAudio.duration;
+    $('#ctrl-play').addEventListener('click', togglePlay);
+    $('#ctrl-play-lg').addEventListener('click', togglePlay);
+    $('#ctrl-download-current').addEventListener('click', () => {
+        if (state.playerTrack?.filename) triggerFileDownload(state.playerTrack.filename);
     });
-    // Volume
-    const volSlider = document.getElementById('player-volume-slider');
-    volSlider.addEventListener('input', () => { if (state.currentAudio) state.currentAudio.volume = volSlider.value / 100; });
-    document.getElementById('ctrl-volume').addEventListener('click', () => {
-        if (state.currentAudio) { state.currentAudio.muted = !state.currentAudio.muted; document.getElementById('ctrl-volume').classList.toggle('active', state.currentAudio.muted); }
+    $('#np-progress-track').addEventListener('click', (e) => {
+        if (!state.audio?.duration) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        state.audio.currentTime = ((e.clientX - rect.left) / rect.width) * state.audio.duration;
+    });
+    $('#player-volume-slider').addEventListener('input', (e) => {
+        if (state.audio) state.audio.volume = e.target.value / 100;
+    });
+    $('#ctrl-volume').addEventListener('click', () => {
+        if (!state.audio) return;
+        state.audio.muted = !state.audio.muted;
+        $('#ctrl-volume').classList.toggle('active', state.audio.muted);
     });
 }
 
 function openNowPlaying() {
-    if (!state.currentAudio) return;
-    document.getElementById('now-playing-overlay').classList.remove('hidden');
-    state.nowPlayingOpen = true;
-    document.body.style.overflow = 'hidden';
+    if (!state.audio) return;
+    $('#now-playing-overlay').classList.remove('hidden');
 }
-
 function closeNowPlaying() {
-    document.getElementById('now-playing-overlay').classList.add('hidden');
-    state.nowPlayingOpen = false;
-    document.body.style.overflow = '';
+    $('#now-playing-overlay').classList.add('hidden');
 }
-
 function togglePlay() {
-    if (!state.currentAudio) return;
-    if (state.currentAudio.paused) state.currentAudio.play().catch(() => {});
-    else state.currentAudio.pause();
+    if (!state.audio) return;
+    if (state.audio.paused) state.audio.play().catch(() => showToast('Tap to play', 'info'));
+    else state.audio.pause();
 }
 
-async function playFile(filename) {
+function setPlayIcons(playing) {
+    const markup = playing
+        ? '<svg viewBox="0 0 24 24" fill="none"><rect x="6.5" y="4" width="4" height="16" rx="1.2" fill="currentColor"/><rect x="13.5" y="4" width="4" height="16" rx="1.2" fill="currentColor"/></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none"><polygon points="7,4 20,12 7,20" fill="currentColor"/></svg>';
+    ['#ctrl-play', '#ctrl-play-lg'].forEach((sel) => {
+        const el = $(sel);
+        if (el) el.innerHTML = markup;
+    });
+}
+
+function playFile(filename) {
     const rawName = filename.split('/').pop() || filename;
     const displayName = rawName.replace(/\.[^.]+$/, '').replace(/_\d{6,}$/, '');
     const parts = displayName.split(' - ');
     const artist = parts.length >= 2 ? parts[0].trim() : '';
     const title = parts.length >= 2 ? parts.slice(1).join(' - ').trim() : displayName;
-    
-    trackStream(artist, title);
-    
-    // Revoke previous blob URL to prevent memory leaks
-    if (state.currentAudio) {
-        const oldSrc = state.currentAudio.src;
-        if (oldSrc && oldSrc.startsWith('blob:')) URL.revokeObjectURL(oldSrc);
-        state.currentAudio.pause();
-        state.currentAudio.remove();
-        state.currentAudio = null;
+
+    trackHistory('streams', artist, title);
+
+    if (state.audio) {
+        state.audio.pause();
+        state.audio.src = '';
+        state.audio = null;
     }
 
-    // Show mini player
-    const miniPlayer = document.getElementById('mini-player');
-    miniPlayer.classList.remove('hidden');
-    document.getElementById('mini-player-track').textContent = title;
-    document.getElementById('mini-player-artist').textContent = artist;
-    document.getElementById('mini-player-progress-fill').style.width = '0%';
-    document.getElementById('mini-player-cover-img').style.display = 'none';
+    const src = `/files/stream?filename=${encodeURIComponent(filename)}`;
+    const audio = new Audio(src);
+    audio.volume = Number($('#player-volume-slider').value) / 100;
+    state.audio = audio;
+    state.playerTrack = { name: title, artists: artist, filename };
 
-    // Update fullscreen
-    document.getElementById('np-track-name').textContent = title;
-    document.getElementById('np-artist-name').textContent = artist;
-    document.getElementById('np-progress-fill').style.width = '0%';
-    document.getElementById('np-time-current').textContent = '0:00';
-    document.getElementById('np-time-total').textContent = '...';
-    document.getElementById('np-cover').style.display = 'none';
-    document.getElementById('np-cover-placeholder').style.display = 'flex';
+    $('#mini-player').classList.remove('hidden');
+    $('#mini-player-track').textContent = title;
+    $('#mini-player-artist').textContent = artist;
+    $('#mini-player-progress-fill').style.width = '0%';
+    $('#mini-player-cover-img').style.display = 'none';
 
-    const playBtns = [document.getElementById('ctrl-play'), document.getElementById('ctrl-play-lg')];
-    
-    // Fetch file as blob for inline playback
-    let audioSrc;
-    try {
-        const fileRes = await fetch(`/files/download/${encodeURIComponent(filename)}`);
-        if (fileRes.ok) {
-            const blob = await fileRes.blob();
-            audioSrc = URL.createObjectURL(blob);
-        }
-    } catch (_) { /* fall through */ }
-    
-    if (!audioSrc) {
-        showToast('Failed to load file for playback', 'error');
-        return;
-    }
-    const audio = new Audio(audioSrc);
-    state.currentAudio = audio;
-    state.playerTrack = { name: title, artists: artist, cover: null, query: displayName };
+    $('#np-track-name').textContent = title;
+    $('#np-artist-name').textContent = artist;
+    $('#np-progress-fill').style.width = '0%';
+    $('#np-time-current').textContent = '0:00';
+    $('#np-time-total').textContent = '0:00';
+    $('#np-cover').style.display = 'none';
+    $('#np-cover-placeholder').style.display = 'flex';
 
     audio.addEventListener('loadedmetadata', () => {
-        const dur = formatTime(audio.duration || 0);
-        document.getElementById('np-time-total').textContent = dur;
-        playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="6,3 20,12 6,21" fill="currentColor"/></svg>'; });
+        $('#np-time-total').textContent = formatTime(audio.duration || 0);
     });
-    audio.addEventListener('play', () => {
-        playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/></svg>'; });
-    });
-    audio.addEventListener('pause', () => {
-        playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="6,3 20,12 6,21" fill="currentColor"/></svg>'; });
-    });
+    audio.addEventListener('play', () => setPlayIcons(true));
+    audio.addEventListener('pause', () => setPlayIcons(false));
     audio.addEventListener('timeupdate', () => {
-        if (audio.duration) {
-            const pct = (audio.currentTime / audio.duration) * 100;
-            document.getElementById('mini-player-progress-fill').style.width = `${pct}%`;
-            document.getElementById('np-progress-fill').style.width = `${pct}%`;
-            document.getElementById('np-time-current').textContent = formatTime(audio.currentTime);
-        }
+        if (!audio.duration) return;
+        const pct = (audio.currentTime / audio.duration) * 100;
+        $('#mini-player-progress-fill').style.width = `${pct}%`;
+        $('#np-progress-fill').style.width = `${pct}%`;
+        $('#np-time-current').textContent = formatTime(audio.currentTime);
     });
     audio.addEventListener('ended', () => {
-        playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="6,3 20,12 6,21" fill="currentColor"/></svg>'; });
-        document.getElementById('mini-player-progress-fill').style.width = '0%';
-        document.getElementById('np-progress-fill').style.width = '0%';
-        document.getElementById('np-time-current').textContent = '0:00';
-        if (audio.src && audio.src.startsWith('blob:')) URL.revokeObjectURL(audio.src);
+        setPlayIcons(false);
+        $('#mini-player-progress-fill').style.width = '0%';
+        $('#np-progress-fill').style.width = '0%';
+        $('#np-time-current').textContent = '0:00';
     });
-    audio.addEventListener('error', () => {
-        showToast('Failed to play file', 'error');
-        playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="6,3 20,12 6,21" fill="currentColor"/></svg>'; });
+    audio.addEventListener('error', () => showToast('Could not play that file', 'error'));
+
+    audio.play().then(() => {
+        showToast(`Playing ${title}`, 'info');
+    }).catch(() => setPlayIcons(false));
+}
+
+/* ── 8. downloads ───────────────────────────────────────────────────────── */
+
+function setupDownload() {
+    $('#btn-download').addEventListener('click', handleImport);
+    $('#download-url').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleImport();
     });
-
-    try {
-        await audio.play();
-        showToast(`Now playing: ${title}`, 'info');
-    } catch (e) {
-        showToast('Tap play to start', 'info');
-        playBtns.forEach(b => { if (b) b.innerHTML = '<svg viewBox="0 0 24 24" fill="none"><polygon points="6,3 20,12 6,21" fill="currentColor"/></svg>'; });
-    }
-}
-
-function formatTime(seconds) {
-    if (!seconds || isNaN(seconds)) return '0:00';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-// ===== Render Search Results =====
-function renderSearchResults(data, query) {
-    const resultsEl = document.getElementById('search-results');
-    let html = '';
-    if (data.tracks && data.tracks.length > 0) {
-        html += `<div class="result-section"><h2>Tracks <span class="count">${data.tracks.length} results</span></h2><div class="results-grid">`;
-        data.tracks.forEach(t => {
-            const imgHtml = t.album_image_url
-                ? `<img src="${escapeHtml(t.album_image_url)}" class="card-cover" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="card-cover-placeholder" style="display:none"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 6v12l10-6z" fill="currentColor"/></svg></div>`
-                : '<div class="card-cover-placeholder"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 6v12l10-6z" fill="currentColor"/></svg></div>';
-            html += `<div class="card" data-type="track" data-id="${escapeHtml(t.id)}" data-title="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.album_image_url)}" data-url="${escapeHtml(t.url)}" data-duration="${t.duration_ms}" data-album="${escapeHtml(t.album)}">
-                ${imgHtml}
-                <div class="card-title">${escapeHtml(t.name)}</div>
-                <div class="card-subtitle">${escapeHtml(t.artists)}</div>
-                <div class="card-meta">${escapeHtml(t.album)} &middot; ${formatDuration(t.duration_ms)}</div>
-                <div class="card-actions-row">
-                    <button class="card-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-                </div>
-            </div>`;
+    $('#pl-select-all').addEventListener('change', (e) => {
+        const boxes = $$('#pl-tracks .pt-check input');
+        state.selected.clear();
+        boxes.forEach((box) => {
+            box.checked = e.target.checked;
+            if (e.target.checked) state.selected.add(Number(box.dataset.idx));
         });
-        html += '</div></div>';
-    }
-    if (data.albums && data.albums.length > 0) {
-        html += `<div class="result-section"><h2>Albums <span class="count">${data.albums.length} results</span></h2><div class="results-grid">`;
-        data.albums.forEach(a => {
-            const imgHtml = a.image_url
-                ? `<img src="${escapeHtml(a.image_url)}" class="card-cover" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="card-cover-placeholder" style="display:none"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/></svg></div>`
-                : '<div class="card-cover-placeholder"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/></svg></div>';
-            html += `<div class="card" data-type="album" data-id="${escapeHtml(a.id)}" data-title="${escapeHtml(a.name)}" data-artist="${escapeHtml(a.artists)}" data-cover="${escapeHtml(a.image_url)}" data-url="${escapeHtml(a.url)}" data-release="${escapeHtml(a.release_date)}" data-tracks="${a.total_tracks}">
-                ${imgHtml}<div class="card-title">${escapeHtml(a.name)}</div><div class="card-subtitle">${escapeHtml(a.artists)}</div><div class="card-meta">${escapeHtml(a.release_date)}</div>
-            </div>`;
-        });
-        html += '</div></div>';
-    }
-    if (data.artists && data.artists.length > 0) {
-        html += `<div class="result-section"><h2>Artists <span class="count">${data.artists.length} results</span></h2><div style="display:flex;flex-direction:column;gap:4px">`;
-        data.artists.forEach(ar => {
-            const avatarHtml = ar.image_url
-                ? `<img src="${escapeHtml(ar.image_url)}" class="artist-avatar" loading="lazy" onerror="this.style.display='none'">`
-                : '<div class="artist-avatar" style="display:flex;align-items:center;justify-content:center"><svg viewBox="0 0 24 24" fill="none" style="width:24px;height:24px;color:var(--text-tertiary)"><circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="2"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6" stroke="currentColor" stroke-width="2"/></svg></div>';
-            html += `<div class="artist-item" data-type="artist" data-id="${escapeHtml(ar.id)}" data-title="${escapeHtml(ar.name)}" data-cover="${escapeHtml(ar.image_url)}" data-url="${escapeHtml(ar.url)}" data-genres="${escapeHtml(ar.genres)}">
-                ${avatarHtml}<div><div class="artist-name">${escapeHtml(ar.name)}</div>${ar.genres ? `<div class="artist-meta">${escapeHtml(ar.genres)}</div>` : ''}</div>
-            </div>`;
-        });
-        html += '</div></div>';
-    }
-    if (data.playlists && data.playlists.length > 0) {
-        html += `<div class="result-section"><h2>Playlists <span class="count">${data.playlists.length} results</span></h2><div class="results-grid">`;
-        data.playlists.forEach(pl => {
-            const imgHtml = pl.image_url
-                ? `<img src="${escapeHtml(pl.image_url)}" class="card-cover" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'"><div class="card-cover-placeholder" style="display:none"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>`
-                : '<div class="card-cover-placeholder"><svg viewBox="0 0 24 24" fill="none"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>';
-            html += `<div class="card" data-type="playlist" data-id="${escapeHtml(pl.id)}" data-title="${escapeHtml(pl.name)}" data-artist="${escapeHtml(pl.owner)}" data-cover="${escapeHtml(pl.image_url)}" data-url="${escapeHtml(pl.url)}" data-tracks="${pl.tracks_count}">
-                ${imgHtml}<div class="card-title">${escapeHtml(pl.name)}</div><div class="card-subtitle">By ${escapeHtml(pl.owner)}</div><div class="card-meta">${pl.tracks_count} tracks</div>
-            </div>`;
-        });
-        html += '</div></div>';
-    }
-    if (!data.tracks?.length && !data.albums?.length && !data.artists?.length && !data.playlists?.length) {
-        html = `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" class="empty-icon"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><p>No results found for "${escapeHtml(query)}"</p></div>`;
-    }
-    resultsEl.innerHTML = html;
-}
-
-// ===== Download =====
-function setupDownload() { document.getElementById('btn-download').addEventListener('click', triggerDownload); }
-
-async function triggerDownload() {
-    const urlInput = document.getElementById('download-url');
-    const url = urlInput.value.trim();
-    if (!url) { showToast('Please enter a Spotify URL', 'error'); return; }
-    if (!url.includes('spotify.com')) { showToast('Please enter a valid Spotify URL', 'error'); return; }
-
-    // Check if it's a playlist URL
-    if (url.includes('/playlist/')) {
-        devLog('Playlist URL detected, fetching tracks...', { url });
-        showDownloadOverlay('Loading playlist...', 0);
+        updateSelectionUI();
+    });
+    $('#pl-tracks').addEventListener('click', onPlaylistTrackClick);
+    $('#pl-download-selected').addEventListener('click', () => {
+        const tracks = [...state.selected].map((i) => state.playlist?.tracks[i]).filter(Boolean);
+        startJob(tracks, 'Spotify selection', false);
+    });
+    $('#pl-download-all').addEventListener('click', () => {
+        const tracks = state.playlist?.tracks || [];
+        startJob(tracks, 'Spotify playlist', true);
+    });
+    $('#pl-zip').addEventListener('click', () => {
+        if (state.job) downloadJobZip(state.job.id, state.job.name);
+    });
+    $('#job-zip').addEventListener('click', () => {
+        if (state.job?.id) downloadJobZip(state.job.id, state.job.name);
+    });
+    $('#job-copy').addEventListener('click', async () => {
+        if (!state.playlistKey) return showToast('No shareable link for this job', 'error');
+        const url = `${location.origin}/p/${state.playlistKey}`;
         try {
-            const previewRes = await fetch('/download/playlist-preview', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, quality: 'HIGH', downloader: state.defaultDownloader }),
-            });
-            if (!previewRes.ok) {
-                const err = await previewRes.json().catch(() => ({ detail: 'Failed to load playlist' }));
-                hideDownloadOverlay();
-                showToast(err.detail || 'Failed to load playlist', 'error');
-                return;
-            }
-            const preview = await previewRes.json();
-            hideDownloadOverlay();
-            if (preview.track_count === 0) {
-                showToast('Playlist is empty', 'error');
-                return;
-            }
-            const confirmed = confirm(`Download ${preview.track_count} tracks from this playlist?`);
-            if (!confirmed) return;
-
-            showDownloadOverlay('Playlist Download', preview.track_count);
-            const batchRes = await fetch('/download/playlist-batch', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url, quality: 'HIGH', downloader: state.defaultDownloader }),
-            });
-            if (!batchRes.ok) {
-                hideDownloadOverlay();
-                showToast('Failed to start batch download', 'error');
-                return;
-            }
-            const batch = await batchRes.json();
-            state._downloadStartTime = Date.now();
-            state._downloadTotalTracks = batch.total;
-            state._downloadCompletedTracks = 0;
-            pollPlaylistBatch(batch.task_ids);
-        } catch (e) {
-            hideDownloadOverlay();
-            showToast('Failed to process playlist', 'error');
-            devLog('Playlist download error', { error: e.message });
+            await navigator.clipboard.writeText(url);
+            showToast('Link copied — reopen it any time', 'success');
+        } catch (_) {
+            prompt('Copy this link', url);
         }
+    });
+    $('#job-dismiss').addEventListener('click', () => {
+        $('#job-panel').classList.add('hidden');
+    });
+}
+
+function classifyUrl(url) {
+    if (/open\.spotify\.com\/(?:intl-[^/]+\/)?track\//.test(url)) return 'track';
+    if (/open\.spotify\.com\/(?:intl-[^/]+\/)?album\//.test(url)) return 'album';
+    if (/open\.spotify\.com\/(?:intl-[^/]+\/)?playlist\//.test(url)) return 'playlist';
+    return null;
+}
+
+function spotifyId(url) {
+    const m = url.match(/\/(?:track|album|playlist)\/([A-Za-z0-9]+)/);
+    return m ? m[1] : null;
+}
+
+async function handleImport() {
+    const url = $('#download-url').value.trim();
+    const status = $('#download-status');
+    status.classList.add('hidden');
+
+    if (!url) return showToast('Paste a Spotify link first', 'error');
+    const kind = classifyUrl(url);
+    if (!kind) return showToast('That does not look like a Spotify link', 'error');
+
+    if (kind === 'track') {
+        startSingleDownload(url, '', '');
         return;
     }
 
-    devLog('Starting download from tab', { url, downloader: state.defaultDownloader });
-    state._downloadStartTime = Date.now();
-    state._downloadTotalTracks = 1;
-    state._downloadCompletedTracks = 0;
-    const trackName = 'Downloading track...';
-    showDownloadOverlay(trackName, 1);
-    startDownloadWithProgress(url, 'tab');
-}
+    const label = $('#btn-download-label');
+    label.textContent = 'Loading…';
+    $('#btn-download').disabled = true;
+    $('#download-url').blur();
 
-// ===== Download Progress System =====
-const PROGRESS_PCT_MAP = { pending: 5, downloading: 30, processing: 75, complete: 100, failed: 100 };
-let _pollContexts = {};   // { taskId: { progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl } }
-let _batchTrackers = {};  // { batchKey: { taskIds, startTime, filenames, total } }
-
-// Called by the Web Worker when it has progress for a task
-function _handleWorkerMessage(e) {
-    const msg = e.data;
-    const taskId = msg.taskId;
-
-    // Handle batch tasks — worker polls these in the background so
-    // playlist downloads keep progressing even when the tab is hidden.
-    for (const [batchKey, bt] of Object.entries(_batchTrackers)) {
-        if (bt.taskIds.includes(taskId)) {
-            if (msg.status === 'complete' || msg.status === 'failed') {
-                _onBatchTaskDone(batchKey, taskId, msg.status, msg.filename);
+    try {
+        if (kind === 'album') {
+            const id = spotifyId(url);
+            if (!id) throw new Error('Could not read that album link');
+            const res = await fetch(`/playlists/album-tracks/${encodeURIComponent(id)}`);
+            if (!res.ok) throw new Error('Album lookup failed');
+            const data = await res.json();
+            const tracks = (data.tracks || []).map((t) => ({
+                name: t.name,
+                artists: t.artists,
+                cover: t.album_image_url,
+                duration: t.duration_ms,
+                url: t.url,
+            }));
+            if (!tracks.length) throw new Error('No tracks found in that album');
+            renderPlaylistPanel({ kind: 'Album', name: 'Spotify album', cover: tracks[0].cover, tracks, key: id });
+        } else {
+            const id = spotifyId(url);
+            const res = await fetch('/download/playlist-preview', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url, quality: 'HIGH' }),
+            });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: 'Could not load that playlist' }));
+                throw new Error(err.detail || 'Could not load that playlist');
             }
-            return; // batch task — don't process as single-task
+            const data = await res.json();
+            const tracks = (data.tracks || []).map((t) => ({
+                name: t.name,
+                artists: t.artists,
+                cover: t.album_image_url,
+                duration: t.duration_ms,
+                url: t.url,
+            }));
+            if (!tracks.length) throw new Error('That playlist has no tracks');
+            renderPlaylistPanel({ kind: 'Playlist', name: 'Spotify playlist', cover: tracks[0].cover, tracks, key: id });
         }
-    }
-
-    // Handle single-task progress UI
-    const ctx = _pollContexts[taskId];
-    if (!ctx) return;
-
-    // Apply progress to UI
-    if (ctx.isInline && ctx.fillEl) {
-        const pct = PROGRESS_PCT_MAP[msg.status] || 0;
-        ctx.fillEl.style.width = `${pct}%`;
-        ctx.stageEl.textContent = msg.stage || msg.status;
-        if (msg.status === 'complete') ctx.fillEl.style.background = '#22c55e';
-        if (msg.status === 'failed') ctx.fillEl.style.background = '#ef4444';
-    } else if (ctx.progressEl) {
-        updateProgressBar(msg, ctx.progressEl, ctx.fillEl, ctx.pctEl, ctx.stageEl);
-    }
-
-    if (msg.status === 'complete') {
-        delete _pollContexts[taskId];
-        localStorage.removeItem('glitchi-active-download');
-        if (ctx.btn) { ctx.btn.disabled = false; ctx.btn.style.opacity = ''; }
-        if (ctx.isInline && ctx.progressEl) { ctx.stageEl.textContent = '✅ Ready!'; ctx.fillEl.style.width = '100%'; ctx.fillEl.style.background = '#22c55e'; setTimeout(() => ctx.progressEl.remove(), 3000); }
-        if (msg.filename) {
-            const displayName = msg.filename.split('/').pop() || 'download.mp3';
-            showToast(`Downloaded: ${displayName}`, 'success');
-            state._downloadCompletedTracks = (state._downloadCompletedTracks || 0) + 1;
-            updateDownloadOverlay('complete', 100, displayName);
-            setTimeout(() => hideDownloadOverlay(), 2500);
-            setTimeout(async () => {
-                try {
-                    const fileRes = await fetch(`/files/download/${encodeURIComponent(msg.filename)}`);
-                    if (!fileRes.ok) { showToast('Failed to fetch file', 'error'); return; }
-                    const blob = await fileRes.blob();
-                    const blobUrl = URL.createObjectURL(blob);
-                    const a = document.createElement('a'); a.href = blobUrl; a.download = msg.filename.split('/').pop() || 'download.mp3';
-                    document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(blobUrl);
-                } catch (e) { showToast('Download payload failed', 'error'); }
-            }, 300);
-            trackDownloadedFile(msg.filename);
-            if (!ctx.isInline) setTimeout(() => { if (ctx.progressEl) ctx.progressEl.classList.add('hidden'); if (ctx.source === 'tab') document.getElementById('download-url').value = ''; renderLocalFiles(); }, 2000);
-        }
-    } else if (msg.status === 'failed') {
-        delete _pollContexts[taskId];
-        localStorage.removeItem('glitchi-active-download');
-        if (ctx.btn) { ctx.btn.disabled = false; ctx.btn.style.opacity = ''; }
-        if (!ctx.isInline) showToast(msg.error || 'Download failed', 'error');
-        if (ctx.isInline && ctx.progressEl) { ctx.stageEl.textContent = '❌ Failed'; ctx.fillEl.style.background = '#ef4444'; setTimeout(() => ctx.progressEl.remove(), 4000); }
-        else if (ctx.progressEl) setTimeout(() => ctx.progressEl.classList.add('hidden'), 4000);
-        updateDownloadOverlay('failed', 0, msg.error || 'Download failed');
-        setTimeout(() => hideDownloadOverlay(), 4000);
-    } else {
-        const pct = PROGRESS_PCT_MAP[msg.status] || 0;
-        updateDownloadOverlay(msg.status, pct, msg.stage || msg.status);
+    } catch (err) {
+        showToast(err.message || 'Could not load that link', 'error');
+        $('#download-status').textContent = err.message || 'Could not load that link';
+        $('#download-status').classList.remove('hidden');
+    } finally {
+        label.textContent = 'Load';
+        $('#btn-download').disabled = false;
     }
 }
 
-async function startDownloadWithProgress(url, source, cardEl, extraFields = {}) {
-    let progressEl, stageEl, pctEl, fillEl, btn, isInline = false;
-    if (source === 'detail') {
-        progressEl = document.getElementById('detail-download-progress');
-        stageEl = document.getElementById('detail-progress-stage');
-        pctEl = document.getElementById('detail-progress-pct');
-        fillEl = document.getElementById('detail-progress-fill-dl');
-        btn = document.getElementById('btn-detail-download');
-    } else if (source === 'inline' && cardEl) {
-        isInline = true;
-        progressEl = null; stageEl = null; fillEl = null; pctEl = null;
-        btn = cardEl.querySelector('.card-dl');
+function renderPlaylistPanel({ kind, name, cover, tracks, key }) {
+    state.playlist = { kind, name, cover, tracks };
+    state.playlistKey = key || null;
+    state.selected.clear();
+
+    $('#pl-kind').textContent = kind;
+    $('#pl-name').textContent = `${tracks.length} tracks`;
+    $('#pl-sub').textContent = `${name} · ${tracks.length} track${tracks.length === 1 ? '' : 's'}`;
+
+    const img = $('#pl-cover');
+    const fallback = $('#pl-cover-fallback');
+    if (cover) {
+        img.src = cover;
+        img.style.display = '';
+        fallback.style.display = 'none';
     } else {
-        progressEl = document.getElementById('download-progress');
-        stageEl = document.getElementById('progress-stage');
-        pctEl = document.getElementById('progress-pct');
-        fillEl = document.getElementById('progress-fill-dl');
-        btn = document.getElementById('btn-download');
-        document.getElementById('download-status').classList.add('hidden');
-        progressEl.classList.remove('hidden');
+        img.style.display = 'none';
+        fallback.style.display = 'flex';
     }
-    if (btn && !isInline) { btn.disabled = true; btn.style.opacity = '0.6'; }
-    if (!isInline) showToast('Download queued...', 'info');
+
+    $('#pl-tracks').innerHTML = tracks.map((t, i) => `<div class="pt-row" data-idx="${i}" data-url="${escapeHtml(t.url)}">
+        <label class="pt-check">
+            <input type="checkbox" data-idx="${i}">
+            <span class="pt-box"></span>
+        </label>
+        <span class="pt-index">${i + 1}</span>
+        ${t.cover ? `<img class="pt-cover" src="${escapeHtml(t.cover)}" alt="" loading="lazy" onerror="this.style.display='none'">` : '<div class="pt-cover fallback"></div>'}
+        <div class="pt-info">
+            <div class="pt-name">${escapeHtml(t.name || 'Unknown track')}</div>
+            <div class="pt-artist">${escapeHtml(t.artists || '')}</div>
+        </div>
+        <span class="pt-duration">${formatDuration(t.duration)}</span>
+        <span class="pt-status" data-status-for="${i}"></span>
+        <button class="icon-btn pt-dl" data-idx="${i}" title="Download this track">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0l-4-4m4 4l4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M5 19h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </button>
+    </div>`).join('');
+
+    updateSelectionUI();
+    $('#playlist-panel').classList.remove('hidden');
+    $('#playlist-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function onPlaylistTrackClick(e) {
+    const row = e.target.closest('.pt-row');
+    if (!row) return;
+    const idx = Number(row.dataset.idx);
+    const track = state.playlist?.tracks[idx];
+    if (!track) return;
+
+    if (e.target.closest('.pt-dl')) {
+        e.stopPropagation();
+        startSingleDownload(track.url, track.artists, track.name, { rowEl: row });
+        return;
+    }
+    if (e.target.closest('.pt-check')) {
+        // native checkbox handles itself; sync state after the change event
+        setTimeout(() => {
+            const box = row.querySelector('input[type="checkbox"]');
+            if (box.checked) state.selected.add(idx); else state.selected.delete(idx);
+            updateSelectionUI();
+        }, 0);
+    }
+}
+
+function updateSelectionUI() {
+    const total = state.playlist?.tracks.length || 0;
+    const selected = state.selected.size;
+    const all = $('#pl-select-all');
+    const count = $('#pl-selected-count');
+
+    if (all) {
+        all.checked = total > 0 && selected === total;
+        all.indeterminate = selected > 0 && selected < total;
+    }
+    if (count) count.textContent = `${selected} of ${total} selected`;
+    $('#pl-download-selected').disabled = selected === 0;
+    $('#pl-download-all').disabled = total === 0;
+}
+
+/* ── single track download ── */
+
+async function startSingleDownload(url, artist, title, opts = {}) {
+    if (!url) return showToast('No Spotify URL for that track', 'error');
+    const btn = opts.btn;
+    const row = opts.rowEl;
+    if (btn) { btn.disabled = true; btn.classList.add('busy'); }
+
+    showProgressCard(title || 'Downloading track…');
+    setProgress('pending', 'Queued…');
+    keepAwake();
+
     try {
         const res = await fetch('/download/task', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, quality: 'HIGH', downloader: state.defaultDownloader, ...extraFields }),
+            keepalive: true,
+            body: JSON.stringify({
+                url,
+                quality: 'HIGH',
+                downloader: state.defaultDownloader,
+                artist: artist || '',
+                title: title || '',
+            }),
         });
         if (!res.ok) {
-            const err = await res.json().catch(() => ({ detail: 'Failed to start download' }));
-            showToast(err.detail || 'Failed to start download', 'error');
-            if (isInline && progressEl) progressEl.remove(); else progressEl.classList.add('hidden');
-            if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-            return;
+            const err = await res.json().catch(() => ({ detail: 'Could not start download' }));
+            throw new Error(err.detail || 'Could not start download');
         }
         const data = await res.json();
-        const taskId = data.task_id;
-        devLog('Download task created', { taskId, source });
-        localStorage.setItem('glitchi-active-download', JSON.stringify({ taskId, url, source, startedAt: Date.now() }));
-        pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl);
-    } catch (e) {
-        if (!isInline) showToast('Download failed to start', 'error');
-        devLog('Download task start error', { error: e.message });
-        if (isInline && progressEl) progressEl.remove(); else progressEl.classList.add('hidden');
-        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+        state.pollContexts[data.task_id] = { btn, rowEl: row, title: title || '' };
+        writeJSON(LS.activeDownload, { taskId: data.task_id, title: title || '', startedAt: Date.now() });
+        setRowStatus(row, 'pending');
+        state.worker?.postMessage({ action: 'start', taskId: data.task_id });
+    } catch (err) {
+        showToast(err.message, 'error');
+        hideProgressCard();
+        if (btn) { btn.disabled = false; btn.classList.remove('busy'); }
+        setRowStatus(row, null);
+        syncWakeLock();
     }
 }
 
-function pollDownloadProgress(taskId, progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl) {
-    // Store context — _handleWorkerMessage applies UI updates when worker posts progress.
-    // The Web Worker polls in a separate thread so downloads keep progressing
-    // even when the browser tab is hidden or in the background.
-    _pollContexts[taskId] = { progressEl, stageEl, pctEl, fillEl, source, btn, isInline, cardEl };
-    if (state._pollWorker) state._pollWorker.postMessage({ action: 'start', taskId });
+function showProgressCard(title) {
+    $('#progress-title').textContent = title;
+    $('#progress-pct').textContent = '0%';
+    $('#progress-fill-dl').style.width = '0%';
+    $('#progress-fill-dl').className = 'progress-fill';
+    $('#download-progress').classList.remove('hidden');
 }
 
-function updateProgressBar(task, progressEl, fillEl, pctEl, stageEl) {
-    const pct = PROGRESS_PCT_MAP[task.status] || 0;
-    fillEl.style.width = `${pct}%`; pctEl.textContent = `${pct}%`; stageEl.textContent = task.stage || task.status;
-    fillEl.className = 'progress-fill-dl';
-    if (task.status === 'complete') fillEl.classList.add('complete');
-    else if (task.status === 'failed') fillEl.classList.add('failed');
-    else if (task.status === 'downloading') fillEl.classList.add('indeterminate');
-    const steps = progressEl.querySelectorAll('.progress-step');
-    const statusOrder = ['pending', 'downloading', 'processing', 'complete'];
-    const currentIdx = statusOrder.indexOf(task.status);
-    if (task.status === 'failed') { steps.forEach(s => { s.className = 'progress-step failed'; }); return; }
-    steps.forEach((step, i) => { step.className = 'progress-step'; if (i < currentIdx) step.classList.add('done'); else if (i === currentIdx) step.classList.add('active'); });
+function hideProgressCard() {
+    $('#download-progress').classList.add('hidden');
 }
 
-function resumeActiveDownloads() {
-    const active = localStorage.getItem('glitchi-active-download');
-    if (!active) return;
+function setProgress(stage, detail) {
+    const pct = PROGRESS_PCT[stage] ?? 0;
+    $('#progress-pct').textContent = `${pct}%`;
+    $('#progress-fill-dl').style.width = `${pct}%`;
+    $('#progress-fill-dl').className = `progress-fill ${stage}`;
+    $('#progress-title').textContent = detail || stage;
+    const order = ['pending', 'downloading', 'processing', 'complete'];
+    const idx = order.indexOf(stage);
+    $$('#download-progress .progress-step').forEach((step) => {
+        const stepIdx = order.indexOf(step.dataset.step);
+        step.classList.toggle('done', stepIdx < idx);
+        step.classList.toggle('active', stepIdx === idx);
+        step.classList.toggle('failed', stage === 'failed');
+    });
+}
+
+function onSingleProgress(task) {
+    setProgress(task.status, task.stage || task.status);
+    const ctx = state.pollContexts[task.task_id];
+
+    if (task.status === 'complete') {
+        delete state.pollContexts[task.task_id];
+        try { localStorage.removeItem(LS.activeDownload); } catch (_) {}
+        if (ctx?.btn) { ctx.btn.disabled = false; ctx.btn.classList.remove('busy'); }
+        setRowStatus(ctx?.rowEl, 'complete');
+
+        if (task.filename) {
+            const name = task.filename.split('/').pop();
+            trackDownloadedFile(task.filename);
+            showToast(`Saved ${name}`, 'success');
+            triggerFileDownload(task.filename);
+            loadFiles();
+        }
+        setTimeout(hideProgressCard, 2600);
+        syncWakeLock();
+    } else if (task.status === 'failed') {
+        delete state.pollContexts[task.task_id];
+        try { localStorage.removeItem(LS.activeDownload); } catch (_) {}
+        if (ctx?.btn) { ctx.btn.disabled = false; ctx.btn.classList.remove('busy'); }
+        setRowStatus(ctx?.rowEl, 'failed');
+        showToast(task.error || 'Download failed', 'error');
+        setTimeout(hideProgressCard, 3200);
+        syncWakeLock();
+    } else {
+        setRowStatus(ctx?.rowEl, task.status);
+    }
+}
+
+function setRowStatus(row, status) {
+    if (!row) return;
+    const el = row.querySelector('.pt-status');
+    if (!el) return;
+    const labels = { pending: 'Queued', downloading: 'Downloading', processing: 'Tagging', complete: 'Ready', failed: 'Failed' };
+    el.textContent = labels[status] || '';
+    el.className = `pt-status ${status || ''}`;
+    row.classList.toggle('done', status === 'complete');
+}
+
+async function resumeSingleDownload() {
+    const saved = readJSON(LS.activeDownload, null);
+    if (!saved?.taskId) return;
+    if (Date.now() - (saved.startedAt || 0) > 45 * 60 * 1000) {
+        try { localStorage.removeItem(LS.activeDownload); } catch (_) {}
+        return;
+    }
     try {
-        const info = JSON.parse(active);
-        const age = Date.now() - info.startedAt;
-        if (age > 600000) { localStorage.removeItem('glitchi-active-download'); return; }
-        if (info.source === 'inline') { localStorage.removeItem('glitchi-active-download'); return; }
-        const isDetail = info.source === 'detail';
-        const progressEl = document.getElementById(isDetail ? 'detail-download-progress' : 'download-progress');
-        const stageEl = document.getElementById(isDetail ? 'detail-progress-stage' : 'progress-stage');
-        const pctEl = document.getElementById(isDetail ? 'detail-progress-pct' : 'progress-pct');
-        const fillEl = document.getElementById(isDetail ? 'detail-progress-fill-dl' : 'progress-fill-dl');
-        const btn = document.getElementById(isDetail ? 'btn-detail-download' : 'btn-download');
-        if (progressEl) {
-            progressEl.classList.remove('hidden');
-            // Resume via single poll + worker (works in background tabs)
-            _pollContexts[info.taskId] = { progressEl, stageEl, pctEl, fillEl, source: info.source, btn, isInline: false, cardEl: null };
-            (async () => {
-                try {
-                    const res = await fetch(`/download/progress/${info.taskId}`);
-                    if (!res.ok) return;
-                    const task = await res.json();
-                    _handleWorkerMessage({ data: { taskId: info.taskId, ...task } });
-                } catch (_) {}
-            })();
-            if (state._pollWorker) state._pollWorker.postMessage({ action: 'start', taskId: info.taskId });
-        }
-    } catch (e) { localStorage.removeItem('glitchi-active-download'); }
-}
-
-// ===== Download Loading Overlay (Spotisaver-style) =====
-function showDownloadOverlay(name, totalTracks) {
-    const overlay = document.getElementById('download-overlay');
-    const nameEl = document.getElementById('dl-overlay-name');
-    const statusEl = document.getElementById('dl-overlay-status');
-    const pctEl = document.getElementById('dl-overlay-pct');
-    const etaEl = document.getElementById('dl-overlay-eta');
-    const trackCountEl = document.getElementById('dl-overlay-track-count');
-    const fillEl = document.getElementById('dl-overlay-fill');
-    const circleEl = document.getElementById('dl-overlay-circle');
-
-    overlay.classList.remove('hidden');
-    nameEl.textContent = name;
-    statusEl.textContent = 'Starting...';
-    pctEl.textContent = '0%';
-    etaEl.textContent = 'Estimating...';
-    fillEl.style.width = '0%';
-    fillEl.className = 'dl-overlay-fill';
-    circleEl.style.strokeDashoffset = '283';
-
-    if (totalTracks > 1) {
-        trackCountEl.textContent = `0 / ${totalTracks} tracks`;
-        trackCountEl.style.display = '';
-    } else {
-        trackCountEl.style.display = 'none';
+        const res = await fetch(`/download/progress/${saved.taskId}`);
+        if (!res.ok) throw new Error('gone');
+        const task = await res.json();
+        showProgressCard(saved.title || 'Downloading track…');
+        state.pollContexts[saved.taskId] = { btn: null, rowEl: null, title: saved.title || '' };
+        state.worker?.postMessage({ action: 'start', taskId: saved.taskId });
+        onSingleProgress({ task_id: saved.taskId, ...task });
+    } catch (_) {
+        try { localStorage.removeItem(LS.activeDownload); } catch (_) {}
     }
 }
 
-function hideDownloadOverlay() {
-    document.getElementById('download-overlay').classList.add('hidden');
-    state._downloadStartTime = null;
-    state._downloadTotalTracks = 0;
-    state._downloadCompletedTracks = 0;
-}
+/* ── playlist jobs (server-side, survive backgrounding) ── */
 
-function updateDownloadOverlay(stage, pct, detail) {
-    const statusEl = document.getElementById('dl-overlay-status');
-    const pctEl = document.getElementById('dl-overlay-pct');
-    const etaEl = document.getElementById('dl-overlay-eta');
-    const fillEl = document.getElementById('dl-overlay-fill');
-    const circleEl = document.getElementById('dl-overlay-circle');
-    const trackCountEl = document.getElementById('dl-overlay-track-count');
+async function startJob(tracks, name, autoZip) {
+    const usable = (tracks || []).filter((t) => t?.url);
+    if (!usable.length) return showToast('Nothing to download', 'error');
 
-    const stageLabels = { pending: 'Queued...', downloading: 'Downloading...', processing: 'Processing...', complete: '✅ Ready!', failed: '❌ Failed' };
-    statusEl.textContent = stageLabels[stage] || detail || stage;
-    pctEl.textContent = `${pct}%`;
-    fillEl.style.width = `${pct}%`;
+    $('#pl-download-selected').disabled = true;
+    $('#pl-download-all').disabled = true;
+    showToast(`Starting ${usable.length} track${usable.length === 1 ? '' : 's'}…`, 'info');
+    keepAwake();
 
-    const circumference = 283;
-    const offset = circumference - (pct / 100) * circumference;
-    circleEl.style.strokeDashoffset = offset;
-
-    if (stage === 'complete') {
-        fillEl.className = 'dl-overlay-fill complete';
-        circleEl.style.stroke = '#22c55e';
-        etaEl.textContent = 'Done!';
-    } else if (stage === 'failed') {
-        fillEl.className = 'dl-overlay-fill failed';
-        circleEl.style.stroke = '#ef4444';
-        etaEl.textContent = 'Failed';
-    } else {
-        fillEl.className = 'dl-overlay-fill';
-        if (state._downloadStartTime) {
-            const elapsed = Math.round((Date.now() - state._downloadStartTime) / 1000);
-            if (elapsed < 60) etaEl.textContent = `Elapsed: ${elapsed}s`;
-            else if (elapsed < 3600) etaEl.textContent = `Elapsed: ${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
-            else etaEl.textContent = `Elapsed: ${Math.floor(elapsed / 3600)}h ${Math.floor((elapsed % 3600) / 60)}m`;
+    try {
+        const res = await fetch('/playlists/jobs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            keepalive: true,
+            body: JSON.stringify({
+                name,
+                playlist_id: state.playlistKey || '',
+                quality: 'HIGH',
+                downloader: state.defaultDownloader,
+                tracks: usable.map((t) => ({ url: t.url, artist: t.artists || '', title: t.name || '' })),
+            }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: 'Could not start the job' }));
+            throw new Error(err.detail || 'Could not start the job');
         }
-    }
-
-    if (state._downloadTotalTracks > 1) {
-        trackCountEl.style.display = '';
-        trackCountEl.textContent = `${state._downloadCompletedTracks} / ${state._downloadTotalTracks} tracks`;
+        const job = await res.json();
+        state.job = { id: job.job_id, name, total: job.total, startedAt: Date.now(), status: 'running', autoZip: !!autoZip };
+        state.jobSnapshot = job;
+        state._zipFired = false;
+        writeJSON(LS.job, { id: state.job.id, name, total: state.job.total, startedAt: state.job.startedAt, autoZip: !!autoZip });
+        setPlaylistUrl(state.playlistKey);
+        applyJobSnapshot(job);
+        state.worker?.postMessage({ action: 'startJob', jobId: job.job_id });
+    } catch (err) {
+        showToast(err.message, 'error');
+        syncWakeLock();
+    } finally {
+        updateSelectionUI();
     }
 }
 
-async function pollPlaylistBatch(taskIds) {
-    const batchKey = `batch_${Date.now()}`;
+function applyJobSnapshot(job) {
+    if (!job) return;
+    if (!state.job || state.job.id !== job.job_id) {
+        const saved = readJSON(LS.job, null);
+        state.job = {
+            id: job.job_id,
+            name: saved?.name || job.name || 'Playlist',
+            total: job.total,
+            startedAt: saved?.startedAt || Date.now(),
+            autoZip: !!saved?.autoZip,
+            status: job.status,
+        };
+    }
+    state.job.status = job.status;
+    state.jobSnapshot = job;
 
-    _batchTrackers[batchKey] = {
-        taskIds,
-        filenames: [],
-        completed: 0,
-        failed: 0,
-        completedTasks: new Set(),
-        startTime: Date.now(),
-        finished: false
-    };
+    $('#job-panel').classList.remove('hidden');
+    $('#job-name').textContent = state.job.name || 'Playlist';
+    const done = job.completed + job.failed;
+    const pct = job.total ? Math.round((done / job.total) * 100) : 0;
+    $('#job-fill').style.width = `${pct}%`;
+    $('#job-count').textContent = `${done} / ${job.total}`;
 
-    // Let the worker poll all tasks in a separate thread — not throttled
-    // when the browser tab is hidden or in the background.
-    if (state._pollWorker) state._pollWorker.postMessage({ action: 'start', taskIds });
+    const stageText = job.status === 'complete'
+        ? (job.failed ? `Finished with ${job.failed} failed` : 'All tracks ready')
+        : `Downloading ${done} of ${job.total}…`;
+    $('#job-stage').textContent = stageText;
 
-    // Lightweight UI update loop — only refreshes the overlay, doesn't
-    // do its own fetches since the worker handles all data collection.
-    const updateUI = () => {
-        const bt = _batchTrackers[batchKey];
-        if (!bt || bt.finished) return;
+    const zipBtn = $('#job-zip');
+    zipBtn.disabled = job.completed === 0;
+    zipBtn.textContent = job.completed ? `Download ZIP (${job.completed})` : 'Download ZIP';
+    $('#pl-zip').disabled = job.completed === 0;
 
-        const completed = bt.completed + bt.failed;
-        const total = taskIds.length;
-        const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+    $('#job-note').textContent = job.status === 'complete'
+        ? (job.failed ? 'Some tracks failed — the ZIP contains the ones that worked.' : 'Your ZIP is ready to save.')
+        : 'Downloads run on the server — switch apps and they keep going.';
 
-        state._downloadCompletedTracks = completed;
-        updateDownloadOverlay('downloading', pct, `${completed}/${total} tracks`);
+    // per-track status chips, matched by Spotify URL
+    const rows = $$('#pl-tracks .pt-row');
+    (job.items || []).forEach((item) => {
+        const row = rows.find((r) => r.dataset.url === item.url) || null;
+        setRowStatus(row, item.status);
+    });
 
-        // Check timeout
-        if (Date.now() - bt.startTime > 30 * 60 * 1000) {
-            bt.finished = true;
-            if (state._pollWorker) state._pollWorker.postMessage({ action: 'stop', taskIds });
-            updateDownloadOverlay('failed', 0, 'Playlist download timed out');
-            showToast('Playlist download timed out', 'error');
-            setTimeout(() => hideDownloadOverlay(), 3000);
-            delete _batchTrackers[batchKey];
-            return;
-        }
-
-        setTimeout(updateUI, 1500);
-    };
-    updateUI();
-}
-
-// Called by _handleWorkerMessage when the worker reports a batch task finished.
-// Tracks completion/failure counts and filenames, then checks if all tasks are done.
-function _onBatchTaskDone(batchKey, taskId, status, filename) {
-    const bt = _batchTrackers[batchKey];
-    if (!bt || bt.finished) return;
-
-    if (status === 'complete') {
-        if (!bt.completedTasks.has(taskId)) {
-            bt.completedTasks.add(taskId);
-            bt.completed++;
-            if (filename && !bt.filenames.includes(filename)) {
-                bt.filenames.push(filename);
-                trackDownloadedFile(filename);
+    if (job.status === 'complete') {
+        state.worker?.postMessage({ action: 'stopJob', jobId: job.job_id });
+        if (job.completed > 0) {
+            showToast(`${job.completed} track${job.completed === 1 ? '' : 's'} ready${job.failed ? `, ${job.failed} failed` : ''}`, 'success');
+            if (state.job.autoZip && !state._zipFired) {
+                state._zipFired = true;
+                setTimeout(() => downloadJobZip(job.job_id, state.job.name), 900);
             }
+        } else {
+            showToast('Every track in that job failed', 'error');
         }
-    } else if (status === 'failed') {
-        if (!bt.completedTasks.has(taskId)) {
-            bt.completedTasks.add(taskId);
-            bt.failed++;
-        }
+        try { localStorage.removeItem(LS.job); } catch (_) {}
+        state.job = { ...state.job, status: 'complete' };
+        loadFiles();
     }
+    syncWakeLock();
+}
 
-    state._downloadCompletedTracks = bt.completed + bt.failed;
-
-    // All tasks finished? Zip and deliver.
-    if (bt.completed + bt.failed >= bt.taskIds.length) {
-        bt.finished = true;
-        _finishBatchPlaylist(batchKey);
+async function restorePlaylistPage(playlistId) {
+    try {
+        const res = await fetch(`/playlists/jobs/by-playlist/${encodeURIComponent(playlistId)}`);
+        if (!res.ok) throw new Error('gone');
+        const job = await res.json();
+        state.playlistKey = playlistId;
+        state.job = {
+            id: job.job_id,
+            name: job.name || 'Playlist',
+            total: job.total,
+            startedAt: Date.now(),
+            autoZip: false,
+            status: job.status,
+        };
+        state._zipFired = true; // never auto-save a ZIP just from opening the link
+        writeJSON(LS.job, { id: job.job_id, name: state.job.name, total: job.total, startedAt: state.job.startedAt, autoZip: false });
+        applyJobSnapshot(job);
+        if (job.status !== 'complete') {
+            state.worker?.postMessage({ action: 'startJob', jobId: job.job_id });
+            keepAwake();
+        }
+    } catch (_) {
+        state.playlistKey = null;
+        history.replaceState({}, '', '/');
+        showToast('No active download for that link — jobs last 2 hours', 'error');
     }
 }
 
-async function _finishBatchPlaylist(batchKey) {
-    const bt = _batchTrackers[batchKey];
-    if (!bt) return;
-
-    if (state._pollWorker) state._pollWorker.postMessage({ action: 'stop', taskIds: bt.taskIds });
-
-    const hasFailed = bt.failed > 0;
-    const completed = bt.completed + bt.failed;
-
-    if (hasFailed) {
-        updateDownloadOverlay('complete', 100, `${completed} tracks processed (some failed)`);
-    } else {
-        updateDownloadOverlay('complete', 100, `All ${bt.completed} tracks downloaded!`);
+async function resumeJob() {
+    const saved = readJSON(LS.job, null);
+    if (!saved?.id) return;
+    try {
+        const res = await fetch(`/playlists/jobs/${saved.id}`);
+        if (!res.ok) throw new Error('gone');
+        const job = await res.json();
+        state.job = {
+            id: job.job_id,
+            name: saved.name || 'Playlist',
+            total: job.total,
+            startedAt: saved.startedAt || Date.now(),
+            autoZip: !!saved.autoZip,
+            status: job.status,
+        };
+        state._zipFired = true; // never auto-download a ZIP on reload
+        applyJobSnapshot(job);
+        if (job.status !== 'complete') {
+            state.worker?.postMessage({ action: 'startJob', jobId: job.job_id });
+            keepAwake();
+        }
+    } catch (_) {
+        try { localStorage.removeItem(LS.job); } catch (_) {}
     }
-    showToast(`Downloaded ${bt.completed} tracks`, 'success');
-    renderLocalFiles();
+}
 
-    if (bt.filenames.length > 0) {
-        updateDownloadOverlay('zipping', 99, 'Creating zip...');
+function downloadJobZip(jobId, name) {
+    const safe = (name || 'playlist').replace(/[^a-z0-9._ -]/gi, '').trim() || 'playlist';
+    const a = document.createElement('a');
+    a.href = `/playlists/jobs/${encodeURIComponent(jobId)}/zip`;
+    a.download = `${safe}.zip`;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showToast('Preparing ZIP…', 'info');
+}
+
+/* ── 9. keep-alive & polling ────────────────────────────────────────────── */
+
+function startPollWorker() {
+    try {
+        state.worker = new Worker('/static/download-poll-worker.js');
+        state.worker.onmessage = (e) => {
+            const msg = e.data;
+            if (msg.type === 'job' && msg.job_id) applyJobSnapshot(msg);
+            else if (msg.task_id || msg.taskId) onSingleProgress({ ...msg, task_id: msg.task_id || msg.taskId });
+        };
+    } catch (_) {
+        state.worker = null;
+    }
+}
+
+async function keepAwake() {
+    if (!('wakeLock' in navigator) || state.wakeLock) return;
+    try {
+        state.wakeLock = await navigator.wakeLock.request('screen');
+        state.wakeLock.addEventListener('release', () => { state.wakeLock = null; });
+    } catch (_) {
+        state.wakeLock = null;
+    }
+}
+
+function releaseAwake() {
+    if (state.wakeLock) {
+        try { state.wakeLock.release(); } catch (_) {}
+        state.wakeLock = null;
+    }
+}
+
+function activeWork() {
+    return Object.keys(state.pollContexts).length > 0 || state.job?.status === 'running';
+}
+
+function syncWakeLock() {
+    if (activeWork()) keepAwake();
+    else releaseAwake();
+}
+
+document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState !== 'visible') return;
+    if (activeWork()) await keepAwake();
+    state.worker?.postMessage({ action: 'pollNow' });
+
+    // Immediate refresh instead of waiting for the next worker tick.
+    if (state.job?.id && state.job.status === 'running') {
         try {
-            const zipRes = await fetch('/playlists/download-zip', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filenames: bt.filenames }),
-            });
-            if (zipRes.ok) {
-                const blob = await zipRes.blob();
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `playlist-${Date.now()}.zip`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-                updateDownloadOverlay('complete', 100, 'Zip ready!');
-                showToast(`Zipped ${bt.filenames.length} tracks!`, 'success');
-            } else {
-                showToast('Zip creation failed', 'error');
-            }
-        } catch (e) {
-            showToast('Failed to create zip', 'error');
-            devLog('Zip error', { error: e.message });
-        }
+            const res = await fetch(`/playlists/jobs/${state.job.id}`);
+            if (res.ok) applyJobSnapshot(await res.json());
+        } catch (_) {}
     }
+});
 
-    setTimeout(() => { hideDownloadOverlay(); openTab(state.activeTab); }, 2500);
-    delete _batchTrackers[batchKey];
+/* ── 10. modals, settings, utilities ────────────────────────────────────── */
+
+function setupModals() {
+    $('#modal-close').addEventListener('click', closeDetailView);
+    $('#detail-modal').addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) closeDetailView();
+    });
+    $('#now-playing-overlay').addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) closeNowPlaying();
+    });
+
+    $$('[data-settings]').forEach((btn) => btn.addEventListener('click', () => {
+        $('#settings-modal').style.display = 'flex';
+        $('#settings-theme').value = state.theme;
+        $('#settings-downloader').value = state.defaultDownloader;
+        fetchDownloaders();
+    }));
+    $('#settings-close').addEventListener('click', () => { $('#settings-modal').style.display = 'none'; });
+    $('#settings-modal').addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+    });
+
+    $('#playlist-picker-close').addEventListener('click', () => { $('#playlist-picker-modal').style.display = 'none'; });
+    $('#playlist-picker-modal').addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) e.currentTarget.style.display = 'none';
+    });
+    $('#btn-new-playlist-picker').addEventListener('click', () => {
+        $('#playlist-picker-modal').style.display = 'none';
+        createPlaylistWithItem(state.pendingItem);
+    });
+
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if ($('#changelog-modal').style.display === 'flex') closeChangelog();
+        else if ($('#settings-modal').style.display === 'flex') $('#settings-modal').style.display = 'none';
+        else if ($('#playlist-picker-modal').style.display === 'flex') $('#playlist-picker-modal').style.display = 'none';
+        else if (!$('#detail-modal').classList.contains('hidden')) closeDetailView();
+        else if (!$('#now-playing-overlay').classList.contains('hidden')) closeNowPlaying();
+    });
 }
 
-// ===== Playlists =====
-function setupPlaylists() {
-    document.getElementById('btn-new-playlist').addEventListener('click', createNewPlaylist);
+function setupSettings() {
+    $('#settings-theme').addEventListener('change', (e) => applyTheme(e.target.value));
+    $('#settings-downloader').addEventListener('change', (e) => {
+        state.defaultDownloader = e.target.value;
+        localStorage.setItem(LS.downloader, e.target.value);
+        showToast(`Engine: ${e.target.value}`, 'info');
+    });
+    $('#btn-show-changelog').addEventListener('click', async () => {
+        $('#settings-modal').style.display = 'none';
+        openChangelog(state.devNotes || await fetchDevNotes());
+    });
+    $('#btn-export-data').addEventListener('click', () => {
+        const payload = { playlists: state.playlists, files: state.files, theme: state.theme };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'glitchi-stream-data.json';
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 20000);
+        showToast('Data exported', 'success');
+    });
+    $('#btn-clear-storage').addEventListener('click', () => {
+        if (!confirm('Clear playlists, themes and cached library data from this browser?')) return;
+        localStorage.clear();
+        state.playlists = [];
+        state.files = [];
+        state.detailItem = null;
+        state.job = null;
+        $('#settings-modal').style.display = 'none';
+        location.reload();
+    });
 }
 
-function createNewPlaylist() {
-    const name = prompt('Playlist name:');
-    if (!name || !name.trim()) return;
-    const playlist = { id: Date.now().toString(), name: name.trim(), tracks: [], createdAt: Date.now() };
-    state.playlists.unshift(playlist); savePlaylists(); renderPlaylists();
-    showToast(`Playlist "${playlist.name}" created!`, 'success');
+function openPlaylistPicker(item) {
+    state.pendingItem = item;
+    const list = $('#playlist-picker-list');
+    if (!state.playlists.length) {
+        list.innerHTML = '<p class="muted-text">No playlists yet</p>';
+    } else {
+        list.innerHTML = state.playlists.map((p) => `<button class="picker-item" data-playlist-id="${p.id}">
+            <span>${escapeHtml(p.name)}</span>
+            <span class="picker-count">${p.tracks.length}</span>
+        </button>`).join('');
+        $$('.picker-item', list).forEach((el) => el.addEventListener('click', () => {
+            const playlist = state.playlists.find((p) => p.id === el.dataset.playlistId);
+            if (playlist && item) {
+                playlist.tracks.push({
+                    name: item.name, artists: item.artists, cover: item.cover,
+                    url: item.url, duration: item.duration || '', album: item.album || '', addedAt: Date.now(),
+                });
+                savePlaylists(); renderPlaylists();
+                showToast(`Added to “${playlist.name}”`, 'success');
+            }
+            $('#playlist-picker-modal').style.display = 'none';
+        }));
+    }
+    $('#playlist-picker-modal').style.display = 'flex';
 }
-function createNewPlaylistWithItem(item) {
+
+function createPlaylistWithItem(item) {
     if (!item) return;
     const name = prompt('Playlist name:');
     if (!name || !name.trim()) return;
-    const playlist = { id: Date.now().toString(), name: name.trim(), tracks: [{ name: item.name, artists: item.artists, cover: item.cover, url: item.url, duration: item.duration || '', album: item.album || '', addedAt: Date.now() }], createdAt: Date.now() };
-    state.playlists.unshift(playlist); savePlaylists(); renderPlaylists();
-    showToast(`Added to "${playlist.name}"!`, 'success');
-}
-function savePlaylists() { localStorage.setItem('glitchi-playlists', JSON.stringify(state.playlists)); }
-function renderPlaylists() {
-    const container = document.getElementById('playlists-list');
-    if (state.playlists.length === 0) {
-        container.innerHTML = `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" class="empty-icon"><path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><p>No playlists yet. Create one to get started!</p></div>`;
-        return;
-    }
-    container.innerHTML = state.playlists.map(p => `<div class="playlist-card" data-playlist-id="${p.id}">
-        <div class="playlist-card-name">${escapeHtml(p.name)}</div><div class="playlist-card-count">${p.tracks.length} track${p.tracks.length !== 1 ? 's' : ''}</div>
-        <div class="playlist-card-actions">
-            <button class="playlist-card-btn download" data-action="download-zip">📦 Download ZIP</button>
-            <button class="playlist-card-btn delete" data-action="delete">🗑 Delete</button>
-        </div></div>`).join('');
-    container.querySelectorAll('.playlist-card').forEach(card => {
-        card.addEventListener('click', (e) => {
-            const action = e.target.dataset.action; const playlistId = card.dataset.playlistId;
-            const playlist = state.playlists.find(p => p.id === playlistId); if (!playlist) return;
-            if (action === 'download-zip') { e.stopPropagation(); downloadPlaylistZip(playlist); }
-            else if (action === 'delete') { e.stopPropagation(); if (confirm(`Delete playlist "${playlist.name}"?`)) { state.playlists = state.playlists.filter(p => p.id !== playlistId); savePlaylists(); renderPlaylists(); showToast('Playlist deleted', 'info'); } }
-            else openPlaylistView(playlist);
-        });
+    state.playlists.unshift({
+        id: Date.now().toString(),
+        name: name.trim(),
+        tracks: [{ name: item.name, artists: item.artists, cover: item.cover, url: item.url, addedAt: Date.now() }],
+        createdAt: Date.now(),
     });
+    savePlaylists(); renderPlaylists();
+    showToast(`Added to “${name.trim()}”`, 'success');
 }
-function openPlaylistView(playlist) {
-    const modal = document.getElementById('detail-modal');
-    document.getElementById('detail-type').textContent = 'PLAYLIST';
-    document.getElementById('detail-title').textContent = playlist.name;
-    document.getElementById('detail-subtitle').textContent = `${playlist.tracks.length} tracks`;
-    document.getElementById('detail-meta').textContent = `Created ${new Date(playlist.createdAt).toLocaleDateString()}`;
-    document.getElementById('detail-cover').style.display = 'none';
-    document.getElementById('detail-tracks').style.display = '';
-    const listEl = document.getElementById('detail-tracks-list');
-    if (playlist.tracks.length === 0) { listEl.innerHTML = '<p style="color:var(--text-tertiary);padding:16px">No tracks in this playlist</p>'; }
-    else {
-        listEl.innerHTML = playlist.tracks.map((t, i) => {
-            const img = t.cover ? `<img class="track-cover" src="${escapeHtml(t.cover)}" onerror="this.remove()">` : '';
-            return `<div class="track-row" data-name="${escapeHtml(t.name)}" data-artist="${escapeHtml(t.artists)}" data-cover="${escapeHtml(t.cover)}" data-url="${escapeHtml(t.url)}">
-                <span class="track-num">${i+1}</span>${img}
-                <div class="track-info"><div class="track-name">${escapeHtml(t.name)}</div><div class="track-artist">${escapeHtml(t.artists)}</div></div>
-                <span class="track-duration">${t.duration || ''}</span>
-                <button class="track-remove" title="Remove" data-index="${i}"><svg viewBox="0 0 24 24" fill="none" style="width:14px;height:14px"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
-                <button class="track-dl" title="Download"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><path d="M8 12l4 4 4-4M12 8v8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-            </div>`;
-        }).join('');
-        listEl.querySelectorAll('.track-remove').forEach(btn => btn.addEventListener('click', (e) => {
-            e.stopPropagation(); const idx = parseInt(btn.dataset.index);
-            playlist.tracks.splice(idx, 1); savePlaylists(); openPlaylistView(playlist); renderPlaylists(); showToast('Track removed', 'info');
-        }));
-        listEl.querySelectorAll('.track-row').forEach(row => {
-            const plArtist = row.dataset.artist, plName = row.dataset.name;
-            row.addEventListener('click', (e) => {
-                if (e.target.closest('.track-remove') || e.target.closest('.track-dl')) return;
-                if (row.dataset.url) downloadFromDetail(row.dataset.url, plArtist, plName);
-            });
-            const dl = row.querySelector('.track-dl');
-            if (dl) dl.addEventListener('click', (e) => { e.stopPropagation(); if (row.dataset.url) downloadFromDetail(row.dataset.url, plArtist, plName); });
-        });
-    }
-    document.getElementById('btn-detail-download').onclick = () => downloadPlaylistZip(playlist);
-    document.getElementById('btn-detail-download').style.display = '';
-    document.getElementById('btn-detail-add-playlist').style.display = 'none';
-    document.getElementById('btn-detail-open-spotify').style.display = 'none';
-    document.getElementById('detail-modal').classList.remove('hidden');
-    document.body.style.overflow = 'hidden';
-}
-async function downloadPlaylistZip(playlist) {
-    if (playlist.tracks.length === 0) { showToast('Playlist is empty', 'error'); return; }
-    const localFiles = state.downloadedFiles;
-    const matchedFiles = [], unmatchedTracks = [];
-    
-    // Smart matching: check filename, displayName, and partial word overlap
-    for (const track of playlist.tracks) {
-        let found = false;
-        const trackWords = (track.name || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
-        const artistWords = (track.artists || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').split(/\s+/).filter(w => w.length > 1);
-        for (const lf of localFiles) {
-            const sfName = (lf.displayName || lf.filename || '').toLowerCase();
-            // Match by track name words AND artist words
-            const nameMatch = trackWords.length > 0 && trackWords.every(w => sfName.includes(w));
-            const artistMatch = artistWords.length > 0 && artistWords.some(w => sfName.includes(w));
-            if (nameMatch || artistMatch) { matchedFiles.push(lf.filename); found = true; break; }
-        }
-        if (!found) unmatchedTracks.push(track);
-    }
-    
-    if (matchedFiles.length === 0) {
-        // Offer to download the tracks first — but since downloads are async,
-        // explain that the user needs to come back after downloads finish.
-        const undownloadedUrls = unmatchedTracks.map(t => t.url).filter(Boolean);
-        if (undownloadedUrls.length > 0) {
-            const count = Math.min(undownloadedUrls.length, 10);
-            const confirmed = confirm(`No downloaded files match this playlist. Download ${count} tracks now?\n\n(Downloads run in the background — come back to the Downloads tab to check progress, then click Download ZIP again.)`);
-            if (confirmed) {
-                closeDetailView();
-                const toDownload = undownloadedUrls.slice(0, 10);
-                showToast(`Queued ${toDownload.length} tracks for download`, 'info');
-                // Fire all downloads immediately — backend semaphore limits concurrency
-                toDownload.forEach(url => startDownloadWithProgress(url, 'tab'));
+
+function fetchDownloaders() {
+    fetch('/download/available')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+            if (!data) return;
+            const select = $('#settings-downloader');
+            const available = data.available || [];
+            if (available.length && !available.includes(state.defaultDownloader)) {
+                state.defaultDownloader = available[0];
+                localStorage.setItem(LS.downloader, available[0]);
             }
-        } else {
-            showToast('No matching files found and no Spotify URLs to download', 'error');
-        }
-        return;
-    }
-    if (unmatchedTracks.length > 0) showToast(`Zipping ${matchedFiles.length} tracks (${unmatchedTracks.length} not found locally)`, 'info');
-    try {
-        const res = await fetch('/playlists/download-zip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filenames: matchedFiles }) });
-        if (res.ok) { const blob = await res.blob(); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${playlist.name.replace(/[^a-zA-Z0-9]/g, '_')}.zip`; a.click(); showToast('ZIP download started!', 'success'); }
-        else { const err = await res.json().catch(() => ({ detail: 'ZIP creation failed' })); showToast(err.detail || 'ZIP creation failed', 'error'); }
-    } catch (e) { showToast('ZIP download failed', 'error'); }
+            select.value = state.defaultDownloader;
+        })
+        .catch(() => {});
 }
 
-// ===== Playlist Picker =====
-function openPlaylistPicker(item) {
-    state._pendingPlaylistItem = item;
-    const listEl = document.getElementById('playlist-picker-list');
-    if (state.playlists.length === 0) { listEl.innerHTML = '<p style="color:var(--text-tertiary);padding:8px">No playlists yet</p>'; }
-    else {
-        listEl.innerHTML = state.playlists.map(p => `<div class="playlist-picker-item" data-playlist-id="${p.id}">${escapeHtml(p.name)} <span style="color:var(--text-tertiary);font-size:12px">(${p.tracks.length} tracks)</span></div>`).join('');
-        listEl.querySelectorAll('.playlist-picker-item').forEach(el => el.addEventListener('click', () => {
-            const playlist = state.playlists.find(p => p.id === el.dataset.playlistId);
-            if (playlist && item) { playlist.tracks.push({ name: item.name, artists: item.artists, cover: item.cover, url: item.url, duration: item.duration || '', album: item.album || '', addedAt: Date.now() }); savePlaylists(); showToast(`Added to "${playlist.name}"`, 'success'); }
-            document.getElementById('playlist-picker-modal').style.display = 'none';
-        }));
-    }
-    document.getElementById('playlist-picker-modal').style.display = 'flex';
+function trackHistory(bucket, artist, title) {
+    const list = state.history[bucket] || [];
+    list.unshift({ artist, title, at: Date.now() });
+    state.history[bucket] = list.slice(0, 50);
+    writeJSON(LS.history, state.history);
 }
 
-// ===== Utilities =====
-function escapeHtml(str) {
-    if (!str) return '';
-    const div = document.createElement('div'); div.textContent = str; return div.innerHTML;
+function triggerFileDownload(filename) {
+    const name = filename.split('/').pop() || 'track';
+    const a = document.createElement('a');
+    a.href = `/files/download/${encodeURIComponent(filename)}`;
+    a.download = name;
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
 }
 
-async function fetchAvailableDownloaders() {
-    try {
-        const res = await fetch('/download/available');
-        if (!res.ok) return;
-        const data = await res.json();
-        const sel = document.getElementById('settings-downloader');
-        if (!sel) return;
-        const current = state.defaultDownloader;
-        sel.innerHTML = '';
-        const allOptions = [
-            { value: 'ytdlp', label: 'yt-dlp (YouTube Audio)' },
-            { value: 'spotdl', label: 'SpotDL (Spotify → YouTube)' },
-        ];
-        for (const opt of allOptions) {
-            const available = data.available.includes(opt.value);
-            const option = document.createElement('option');
-            option.value = opt.value; option.textContent = opt.label + (available ? '' : ' [NOT INSTALLED]'); option.disabled = !available;
-            sel.appendChild(option);
-        }
-        if (data.available.includes(current)) sel.value = current;
-        else if (data.available.length > 0) { sel.value = data.available[0]; state.defaultDownloader = data.available[0]; localStorage.setItem('glitchi-downloader', data.available[0]); }
-    } catch (e) { devLog('Failed to fetch downloaders', { error: e.message }); }
+function emptyState(kind, text) {
+    const icons = {
+        search: '<circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M20 20l-3.8-3.8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>',
+        files: '<path d="M9 18V6l11-2v12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="3" stroke="currentColor" stroke-width="1.4"/><circle cx="17" cy="16" r="3" stroke="currentColor" stroke-width="1.4"/>',
+        playlist: '<path d="M9 4h11M9 12h11M9 20h11M5 4v.01M5 12v.01M5 20v.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
+    };
+    return `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" class="empty-icon">${icons[kind] || icons.search}</svg><p>${escapeHtml(text)}</p></div>`;
+}
+
+function showToast(message, type = 'info') {
+    const container = $('#toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('in'));
+    setTimeout(() => {
+        toast.classList.remove('in');
+        setTimeout(() => toast.remove(), 240);
+    }, 3400);
+}
+
+function formatDuration(ms) {
+    if (!ms) return '';
+    const total = Math.round(Number(ms) / 1000);
+    const mins = Math.floor(total / 60);
+    const secs = total % 60;
+    return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function formatTime(seconds) {
+    if (!seconds || Number.isNaN(seconds)) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function escapeHtml(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }

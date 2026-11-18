@@ -26,6 +26,7 @@ from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, TDRC, TRCK
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
 from mutagen.oggvorbis import OggVorbis
+from mutagen.oggopus import OggOpus
 
 from app.config import settings
 from app.utils.logger import logger
@@ -36,8 +37,69 @@ from app.models.requests import DownloadRequest
 # Binary / availability checks
 # ═══════════════════════════════════════════════════════════════════════
 
-# Module-level ffmpeg availability cache (checked once at import)
-_FFMPEG_AVAILABLE = bool(shutil.which("ffmpeg") or shutil.which("ffmpeg.exe"))
+# ffmpeg is resolved lazily: PATH first, then the static binary shipped by
+# ``imageio-ffmpeg`` (that is how Render gets ffmpeg without a Dockerfile).
+_FFMPEG_PATH: Optional[str] = None
+_FFMPEG_RESOLVED = False
+
+
+def get_ffmpeg_path() -> Optional[str]:
+    """Return a usable ffmpeg binary path, or ``None`` when ffmpeg is missing."""
+    global _FFMPEG_PATH, _FFMPEG_RESOLVED
+    if _FFMPEG_RESOLVED:
+        return _FFMPEG_PATH
+
+    path = _find_binary("ffmpeg", "ffmpeg.exe")
+    if not path:
+        try:
+            import imageio_ffmpeg
+
+            candidate = imageio_ffmpeg.get_ffmpeg_exe()
+            if candidate and os.path.exists(candidate):
+                path = candidate
+        except Exception:
+            path = None
+
+    _FFMPEG_PATH = path
+    _FFMPEG_RESOLVED = True
+    if path:
+        logger.info(f"ffmpeg available: {path}")
+    else:
+        logger.warning("ffmpeg not found — audio keeps its native format (no MP3 conversion)")
+    return path
+
+
+# Cookies let yt-dlp reach YouTube from a flagged (datacenter) IP.
+_COOKIES_PATH: Optional[str] = None
+_COOKIES_RESOLVED = False
+
+
+def get_cookies_file() -> Optional[str]:
+    """Return a Netscape cookies.txt path when cookies are configured."""
+    global _COOKIES_PATH, _COOKIES_RESOLVED
+    if _COOKIES_RESOLVED:
+        return _COOKIES_PATH
+
+    path: Optional[str] = None
+    configured = (settings.YTDLP_COOKIES_FILE or "").strip()
+    if configured and os.path.isfile(configured):
+        path = configured
+    elif (settings.YTDLP_COOKIES or "").strip():
+        try:
+            cookie_path = os.path.join(tempfile.gettempdir(), "glitchi-cookies.txt")
+            with open(cookie_path, "w", encoding="utf-8") as fh:
+                fh.write(settings.YTDLP_COOKIES.replace("\\n", "\n"))
+            os.chmod(cookie_path, 0o600)
+            path = cookie_path
+        except OSError as exc:
+            logger.warning(f"Could not write cookies file: {exc}")
+
+    _COOKIES_PATH = path
+    _COOKIES_RESOLVED = True
+    if path:
+        logger.info("Using configured cookies for downloads")
+    return path
+
 
 def _find_binary(*names: str) -> Optional[str]:
     """Find the first available binary on PATH."""
@@ -63,7 +125,7 @@ def is_ytdlp_available() -> bool:
 
 def is_spotdl_available() -> bool:
     """SpotDL uses yt-dlp under the hood and requires ffmpeg for audio processing."""
-    if not _FFMPEG_AVAILABLE:
+    if not get_ffmpeg_path():
         return False
     return _find_binary("spotdl", "spotdl.exe") is not None or _module_is_importable("spotdl")
 
@@ -134,7 +196,9 @@ def _extract_track_data(track_data: dict) -> dict | None:
     if cover_sources:
         best = max(cover_sources, key=lambda s: s.get("width", 0) * s.get("height", 0))
         cover_url = best.get("url", "")
-    duration_ms = track_data.get("duration", {}).get("totalMilliseconds", 0)
+    # Playlist items expose "trackDuration", search results use "duration"
+    duration_data = track_data.get("duration") or track_data.get("trackDuration") or {}
+    duration_ms = duration_data.get("totalMilliseconds", 0) if isinstance(duration_data, dict) else 0
     url = f"https://open.spotify.com/track/{track_id}" if track_id else ""
     return {
         "id": track_id,
@@ -380,8 +444,14 @@ def inject_metadata(filepath: str, metadata: dict, cover_data: Optional[bytes] =
             _inject_flac(filepath, title, artist, album, year, track_number, cover_data)
         elif ext in (".m4a", ".mp4"):
             _inject_mp4(filepath, title, artist, album, year, track_number, cover_data)
-        elif ext in (".ogg", ".opus"):
+        elif ext == ".ogg":
             _inject_ogg(filepath, title, artist, album, year, track_number, cover_data)
+        elif ext == ".opus":
+            # Opus is not Vorbis — mutagen needs the OggOpus class for it
+            _inject_ogg(
+                filepath, title, artist, album, year, track_number, cover_data,
+                audio_cls=OggOpus,
+            )
         elif ext == ".webm":
             _inject_webm(filepath, title, artist, album, year, track_number, cover_data)
             logger.info(f"Metadata injected: {os.path.basename(filepath)} — {artist} - {title}")
@@ -468,9 +538,9 @@ def _inject_mp4(filepath, title, artist, album, year, track_number, cover_data):
     audio.save()
 
 
-def _inject_ogg(filepath, title, artist, album, year, track_number, cover_data):
+def _inject_ogg(filepath, title, artist, album, year, track_number, cover_data, audio_cls=OggVorbis):
     import base64
-    audio = OggVorbis(filepath)
+    audio = audio_cls(filepath)
     if title:
         audio["title"] = title
     # Always write artist — fall back to "Unknown Artist"
@@ -712,18 +782,189 @@ async def _process_metadata_for_file(
 # Engine 1: yt-dlp (searches YouTube, downloads best audio)
 # ═══════════════════════════════════════════════════════════════════════
 
+_SOURCE_LABELS = {
+    "youtube": "YouTube",
+    "soundcloud": "SoundCloud",
+}
+
+_SOURCE_PREFIX = {
+    "youtube": "ytsearch5",
+    "soundcloud": "scsearch5",
+}
+
+
+class _SourceError(Exception):
+    """A single audio source could not produce a file."""
+
+
+def _resolve_sources() -> list[str]:
+    """Parse AUDIO_SOURCES into a de-duplicated list of known sources."""
+    raw = (settings.AUDIO_SOURCES or "youtube,soundcloud").split(",")
+    sources: list[str] = []
+    for item in raw:
+        name = item.strip().lower()
+        if name in _SOURCE_PREFIX and name not in sources:
+            sources.append(name)
+    return sources or ["youtube", "soundcloud"]
+
+
+def _short_error(exc: BaseException) -> str:
+    """Condense a yt-dlp error into something a toast can show."""
+    text = re.sub(r"\s+", " ", str(exc)).strip()
+    text = text.split(" See ")[0].split("; please report")[0].strip()
+    lowered = text.lower()
+    if "not a bot" in lowered or "sign in to confirm" in lowered:
+        return "blocked (YouTube bot check)"
+    if len(text) > 160:
+        text = text[:157] + "..."
+    return text
+
+
+def _ydl_base_opts() -> dict:
+    """Shared yt-dlp options: quiet, no playlists, optional cookies."""
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "noprogress": True,
+        "socket_timeout": 20,
+        "retries": 2,
+    }
+    cookies = get_cookies_file()
+    if cookies:
+        opts["cookiefile"] = cookies
+    return opts
+
+
+def _is_downloadable_track(entry: dict) -> bool:
+    """Filter out DJ mixes, podcasts and clips when picking a search result."""
+    duration = entry.get("duration")
+    if isinstance(duration, (int, float)) and not (15 <= duration <= 1200):
+        return False
+    return bool(entry.get("webpage_url"))
+
+
+def _rank_matches(entries: list, target_title: str, limit: int = 4) -> list[dict]:
+    """Rank search results by title similarity, best first.
+
+    Several uploads of the same song usually exist, and some are DRM-protected
+    or dead, so the caller walks this list until one actually downloads.
+    """
+    if not entries:
+        return []
+    if not target_title:
+        return entries[:limit]
+
+    scored = [
+        (_title_similarity(target_title, entry.get("title", "")), entry)
+        for entry in entries
+    ]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    ranked = [entry for score, entry in scored if score >= 0.3][:limit]
+    return ranked or [entry for _, entry in scored][:limit]
+
+
+def _download_from_source(
+    source: str, search_query: str, target_title: str, req: DownloadRequest
+) -> str:
+    """Search one audio source and download the best matching track.
+
+    Walks the top search results because individual uploads can be
+    DRM-protected or removed; the first one that yields audio wins.
+
+    Returns a filename relative to DOWNLOAD_DIR, or raises ``_SourceError``.
+    Runs inside a thread executor — yt-dlp is fully synchronous.
+    """
+    prefix = _SOURCE_PREFIX[source]
+    label = _SOURCE_LABELS[source]
+    ffmpeg_path = get_ffmpeg_path()
+    temp_dir = tempfile.mkdtemp(prefix=f"dl_{source}_", dir=settings.DOWNLOAD_DIR)
+
+    try:
+        # Search results are a playlist: one DRM-protected or removed entry
+        # must not abort the whole search, so ignore per-entry errors here.
+        search_opts = _ydl_base_opts()
+        search_opts["ignoreerrors"] = True
+        with yt_dlp.YoutubeDL(search_opts) as ydl:
+            info = ydl.extract_info(f"{prefix}:{search_query}", download=False)
+
+        entries = [e for e in (info or {}).get("entries") or [] if isinstance(e, dict)]
+        entries = [e for e in entries if _is_downloadable_track(e)]
+        candidates = _rank_matches(entries, target_title)
+        if not candidates:
+            raise _SourceError("no usable search results")
+
+        quality_map = {
+            "LOSSLESS": "bestaudio/best",
+            "HIGH": "bestaudio[abr<=320]/bestaudio/best",
+            "MEDIUM": "bestaudio[abr<=160]/bestaudio/best",
+        }
+        fmt = quality_map.get(req.quality or "", "bestaudio/best")
+        if not ffmpeg_path:
+            # Without ffmpeg we cannot remux, so prefer a progressive MP3:
+            # it needs no conversion and takes ID3 tags cleanly.
+            fmt = "bestaudio[ext=mp3]/" + fmt
+
+        base_opts = _ydl_base_opts()
+        base_opts.update({"format": fmt, "keepvideo": False})
+        if ffmpeg_path:
+            base_opts["ffmpeg_location"] = ffmpeg_path
+            base_opts["postprocessors"] = [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+            }]
+
+        last_error = "no downloadable match"
+        for attempt, candidate in enumerate(candidates, start=1):
+            attempt_dir = os.path.join(temp_dir, f"try{attempt}")
+            os.makedirs(attempt_dir, exist_ok=True)
+            logger.info(
+                f"{label} candidate {attempt}/{len(candidates)}: "
+                f"{candidate.get('title', '?')} ({candidate.get('webpage_url', '?')})"
+            )
+            opts = dict(base_opts)
+            opts["outtmpl"] = os.path.join(attempt_dir, "%(title).150B.%(ext)s")
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([candidate["webpage_url"]])
+            except Exception as exc:
+                last_error = _short_error(exc)
+                logger.warning(f"{label} candidate failed: {last_error}")
+                continue
+
+            audio_path = _find_audio_in_dir(attempt_dir)
+            if not audio_path:
+                last_error = "download produced no audio file"
+                continue
+
+            dest = os.path.join(settings.DOWNLOAD_DIR, os.path.basename(audio_path))
+            if os.path.exists(dest):
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+            shutil.move(audio_path, dest)
+            return os.path.relpath(dest, settings.DOWNLOAD_DIR)
+
+        raise _SourceError(last_error)
+    except _SourceError:
+        raise
+    except Exception as exc:
+        raise _SourceError(_short_error(exc)) from exc
+    finally:
+        _cleanup_dir(temp_dir)
+
+
 async def download_ytdlp(
     req: DownloadRequest,
     on_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> Optional[str]:
-    """Download via yt-dlp. Uses SpotAPI metadata to build a YouTube search query.
+    """Download via yt-dlp, trying each configured audio source in order.
 
-    Strategy:
-    1. Extract track ID from Spotify URL
-    2. Fetch metadata from SpotAPI to get "Artist - Title"
-    3. Search YouTube with "Artist - Title" via yt-dlp
-    4. Download best audio to DOWNLOAD_DIR
-    5. Inject metadata tags
+    YouTube refuses datacenter IPs (Render included) with a bot check, so the
+    default order is YouTube → SoundCloud.  Set ``YTDLP_COOKIES`` (cookie file
+    contents) or ``YTDLP_COOKIES_FILE`` to make YouTube work again, and
+    ``AUDIO_SOURCES`` to reorder or restrict the sources.
     """
     if not is_ytdlp_available():
         msg = "yt-dlp not found. Install with: pip install yt-dlp"
@@ -735,26 +976,22 @@ async def download_ytdlp(
     if on_progress:
         await on_progress("pending", "Fetching track info...")
 
-    # Build search query — prefer frontend-provided artist/title (SpotAPI search
-    # results DO return artists, even when get_track_info doesn't)
+    # Metadata drives both the search query and the tags written afterwards.
     metadata = await fetch_metadata(str(req.url))
-    search_query = str(req.url)
-
     frontend_artist = req.artist
     frontend_title = req.title
+
     if frontend_artist and frontend_title:
         search_query = f"{frontend_artist} - {frontend_title}"
-        logger.info(f"yt-dlp search query (from frontend): {search_query}")
     elif metadata and metadata.get("title"):
         if metadata.get("artist"):
             search_query = f"{metadata['artist']} - {metadata['title']}"
         else:
             search_query = metadata["title"]
-        logger.info(f"yt-dlp search query: {search_query}")
+    else:
+        search_query = str(req.url)
 
-    # Enrich metadata with frontend-provided artist/title so they reach the tag injector.
-    # SpotAPI's get_track_info may return empty artist for some tracks, but the
-    # frontend search results DO have the correct artist.
+    # Enrich metadata with frontend-provided artist/title so they reach the tag injector
     if frontend_artist or frontend_title:
         if metadata is None:
             metadata = {}
@@ -763,97 +1000,49 @@ async def download_ytdlp(
         if frontend_title and not metadata.get("title"):
             metadata["title"] = frontend_title
 
-    if on_progress:
-        await on_progress("downloading", f"Searching YouTube: {search_query[:60]}...")
+    target_title = (metadata or {}).get("title") or frontend_title or ""
+    logger.info(f"yt-dlp search query: {search_query}")
 
-    # Map quality to yt-dlp format
-    quality_map = {
-        "LOSSLESS": "bestaudio/best",
-        "HIGH": "bestaudio[abr<=320]/bestaudio/best",
-        "MEDIUM": "bestaudio[abr<=160]/bestaudio/best",
-    }
-    fmt = quality_map.get(req.quality, "bestaudio/best")
+    sources = _resolve_sources()
+    loop = asyncio.get_running_loop()
+    failures: list[str] = []
 
-    # Output template: save to downloads dir with temp name
-    out_tmpl = os.path.join(settings.DOWNLOAD_DIR, "%(title)s.%(ext)s")
-
-
-
-    # Always convert to MP3 via FFmpegExtractAudio — universal ID3 tag support
-    ydl_opts = {
-        "format": fmt,
-        "outtmpl": out_tmpl,
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-        }],
-    }
-
-    try:
-        # Capture metadata for title matching inside the executor
-        _spotify_title = metadata.get("title", "") if metadata else ""
-
-        def _run_ytdlp():
-            # Step 1: search YouTube for top 5 results (don't download yet)
-            search_opts = {"quiet": True, "no_warnings": True, "noplaylist": True}
-            with yt_dlp.YoutubeDL(search_opts) as ydl:
-                info = ydl.extract_info(f"ytsearch5:{search_query}", download=False)
-
-            if not info or "entries" not in info or not info["entries"]:
-                return None
-
-            entries = info["entries"]
-
-            # Step 2: pick the best match by title similarity
-            best = _pick_best_match(entries, _spotify_title)
-            if not best:
-                return None
-
-            logger.info(f"Best match: {best.get('title', '?')} (id={best.get('id', '?')})")
-
-            # Step 3: download ONLY the best match
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([best["webpage_url"]])
-
-            # Step 4: find the downloaded file
-            yt_title = best.get("title", "unknown")
-            for fn in os.listdir(settings.DOWNLOAD_DIR):
-                full = os.path.join(settings.DOWNLOAD_DIR, fn)
-                if os.path.isfile(full) and os.path.getmtime(full) > time.time() - 120:
-                    if fn.startswith(yt_title[:30]) or yt_title[:30] in fn:
-                        ext_lower = os.path.splitext(fn)[1].lower()
-                        if ext_lower in {".mp3", ".webm", ".m4a", ".opus", ".ogg", ".flac", ".wav"}:  # .mp3 first (FFmpegExtractAudio default)
-                            return os.path.relpath(full, settings.DOWNLOAD_DIR)
-            return _find_newest_audio()
-
-        loop = asyncio.get_running_loop()
-        rel_path = await loop.run_in_executor(None, _run_ytdlp)
-
-        if not rel_path:
-            if on_progress:
-                await on_progress("failed", "yt-dlp download produced no file")
-            return None
+    for source in sources:
+        label = _SOURCE_LABELS[source]
+        if on_progress:
+            await on_progress("downloading", f"Searching {label}: {search_query[:60]}")
+        try:
+            rel_path = await loop.run_in_executor(
+                None, _download_from_source, source, search_query, target_title, req
+            )
+        except _SourceError as exc:
+            logger.warning(f"{label} could not deliver {req.url}: {exc}")
+            failures.append(f"{label} {exc}")
+            continue
 
         abs_path = os.path.join(settings.DOWNLOAD_DIR, rel_path)
-
-        # Inject metadata — pass enriched metadata so the frontend artist reaches the tag injector
-        final_filename = await _process_metadata_for_file(abs_path, str(req.url), on_progress, metadata=metadata)
+        try:
+            final_filename = await _process_metadata_for_file(
+                abs_path, str(req.url), on_progress, metadata=metadata
+            )
+        except Exception as exc:
+            logger.error(f"Tagging failed for {rel_path}: {type(exc).__name__}: {exc}")
+            final_filename = rel_path
 
         if on_progress:
             await on_progress("complete", final_filename)
-        logger.info(f"yt-dlp download complete: {req.url} -> {final_filename}")
+        logger.info(f"Download complete via {label}: {req.url} -> {final_filename}")
         return final_filename
 
-    except Exception as e:
-        logger.error(f"yt-dlp download error: {type(e).__name__}: {e}")
-        if on_progress:
-            await on_progress("failed", f"yt-dlp: {type(e).__name__}: {e}")
-        return None
-
-
+    msg = "Download failed — " + "; ".join(failures)
+    if any("bot check" in failure.lower() for failure in failures):
+        msg += " (YouTube blocks this server; add cookies or keep SoundCloud enabled)"
+    if len(msg) > 300:
+        msg = msg[:297] + "..."
+    logger.error(msg)
+    if on_progress:
+        await on_progress("failed", msg)
+    return None
 
 
 def _title_similarity(a: str, b: str) -> float:
@@ -925,6 +1114,11 @@ def _build_spotdl_cmd(req: DownloadRequest, temp_dir: str) -> list[str]:
     else:
         cmd = [sys.executable, "-m", "spotdl"]
     cmd.extend(["download", str(req.url), "--output", temp_dir])
+    # YouTube Music is blocked from datacenter IPs; SoundCloud is the fallback.
+    cmd.extend(["--audio", "soundcloud", "youtube-music"])
+    ffmpeg_path = get_ffmpeg_path()
+    if ffmpeg_path:
+        cmd.extend(["--ffmpeg", ffmpeg_path])
     if req.quality == "LOSSLESS":
         cmd.extend(["--format", "flac"])
     elif req.quality == "HIGH":
@@ -983,6 +1177,10 @@ SpotifyFormatter.formatTrack = _spotdl_patched_formatTrack
     # Prepend temp_dir to sys.path so sitecustomize.py is found
     pp = sub_env.get("PYTHONPATH", "")
     sub_env["PYTHONPATH"] = temp_dir + (os.pathsep + pp if pp else "")
+    # Make the bundled ffmpeg discoverable for SpotDL's internal calls
+    ffmpeg_path = get_ffmpeg_path()
+    if ffmpeg_path:
+        sub_env["PATH"] = os.path.dirname(ffmpeg_path) + os.pathsep + sub_env.get("PATH", "")
 
     try:
         def _run():
@@ -1070,43 +1268,69 @@ SpotifyFormatter.formatTrack = _spotdl_patched_formatTrack
 # Dispatcher — routes to the selected downloader
 # ═══════════════════════════════════════════════════════════════════════
 
+_ENGINES = {
+    "ytdlp": download_ytdlp,
+    "spotdl": download_spotdl,
+}
+
+
 async def run_download(
     req: DownloadRequest,
     on_progress: Optional[Callable[[str, str], Awaitable[None]]] = None,
 ) -> Optional[str]:
-    """Run the download using the configured default downloader.
+    """Run the download, trying the preferred engine then any other available.
 
-    Uses req.downloader if set, otherwise settings.DEFAULT_DOWNLOADER.
-    Falls back to the first available downloader if the configured one
-    is not installed.
+    Terminal states are decided here, not inside the engines, so a first engine
+    that fails (blocked source, DRM, missing tool) never marks the task failed
+    while the second engine can still deliver the file.
     """
     preferred = req.downloader or settings.DEFAULT_DOWNLOADER
     available = get_available_downloaders()
 
     logger.info(f"Download dispatcher: preferred={preferred}, available={available}")
 
-    if preferred in available:
-        engine = preferred
-    elif available:
-        engine = available[0]
-        logger.warning(f"Preferred downloader '{preferred}' not available, using '{engine}'")
-    else:
+    if not available:
         msg = "No downloader available. Install yt-dlp or spotdl."
         logger.error(msg)
         if on_progress:
             await on_progress("failed", msg)
         return None
 
-    logger.info(f"Using downloader: {engine}")
+    order = [preferred] if preferred in available else []
+    order += [engine for engine in available if engine not in order]
+    if preferred not in available:
+        logger.warning(f"Preferred downloader '{preferred}' not available, using '{order[0]}'")
 
-    if engine == "ytdlp":
-        return await download_ytdlp(req, on_progress)
-    elif engine == "spotdl":
-        return await download_spotdl(req, on_progress)
-    else:
-        if on_progress:
-            await on_progress("failed", f"Unknown downloader: {engine}")
-        return None
+    errors: list[str] = []
+    for engine in order:
+        logger.info(f"Using downloader: {engine}")
+        captured: dict[str, str] = {}
+
+        async def engine_progress(stage: str, detail: str, _captured: dict = captured) -> None:
+            if stage in ("complete", "failed"):
+                _captured[stage] = detail
+                return
+            if on_progress:
+                await on_progress(stage, detail)
+
+        filename = await _ENGINES[engine](req, engine_progress)
+        filename = filename or captured.get("complete")
+        if filename:
+            if on_progress:
+                await on_progress("complete", filename)
+            return filename
+
+        error = captured.get("failed", f"{engine} produced no file")
+        errors.append(f"{engine}: {error}")
+        logger.warning(f"{engine} failed, trying next engine: {error}")
+
+    msg = "Download failed — " + "; ".join(errors)
+    if len(msg) > 300:
+        msg = msg[:297] + "..."
+    logger.error(msg)
+    if on_progress:
+        await on_progress("failed", msg)
+    return None
 
 
 # ── Log downloaded files ─────────────────────────────────────────────
